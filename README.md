@@ -72,7 +72,7 @@ SmartTrap is a low-cost IoT device that automates the monitoring of Fall Armywor
 | Button | 4-pin tactile switch | User input |
 
 
-![Alt text](hardware_wirring.jpeg)
+![Alt text](hardware.jpeg)
 
 ### Resistors Required (4 total)
 
