@@ -1,4 +1,4 @@
-# 🦋 SmartTrap v1.0
+# SmartTrap v1.0
 
 **Low-Power IoT Moth Trap Counter for Fall Armyworm Monitoring**
 
@@ -12,19 +12,19 @@ An automated monitoring system that detects, counts, and logs moth entries into 
 
 ---
 
-## 📋 Overview
+## Overview
 
 SmartTrap is a low-cost IoT device that automates the monitoring of Fall Armyworm moth populations. It uses infrared beam-break detection to count moths entering pheromone traps, records video/audio evidence, logs environmental conditions, and enables wireless data transfer via Bluetooth Low Energy (BLE).
 
 ### Key Applications
-- 🌽 Fall Armyworm population monitoring
-- 🔬 Agricultural research and pest management
-- 📊 Integrated Pest Management (IPM) decision support
-- 🌍 Scalable deployment across multiple field sites
+- Fall Armyworm population monitoring
+- Agricultural research and pest management
+- Integrated Pest Management (IPM) decision support
+- Scalable deployment across multiple field sites
 
 ---
 
-## ✨ Features
+## Features
 
 ### Core Functionality
 - **IR Beam-Break Detection** - Accurate moth counting with debounce filtering
@@ -55,7 +55,7 @@ SmartTrap is a low-cost IoT device that automates the monitoring of Fall Armywor
 
 ---
 
-## 🔧 Hardware Requirements
+## Hardware Requirements
 
 ### Main Components
 
@@ -96,7 +96,7 @@ D8-D10      → RESERVED (SD Card - do not use)
 
 ---
 
-## 💻 Software Requirements
+## Software Requirements
 
 ### Arduino IDE Setup
 
@@ -129,7 +129,7 @@ Install via `Sketch → Include Library → Manage Libraries`:
 
 ---
 
-## 📦 Installation
+## Installation
 
 1. **Clone the repository**
    ```bash
@@ -160,7 +160,7 @@ Install via `Sketch → Include Library → Manage Libraries`:
 
 ---
 
-## 📱 Usage
+## Usage
 
 ### USB Modes at Startup
 
@@ -223,7 +223,7 @@ When you plug in the device, you have 10 seconds to choose:
 
 ---
 
-## 📊 Data Format
+## Data Format
 
 ### environment.csv
 ```csv
@@ -239,7 +239,7 @@ timestamp,detection_num,air_temp,humidity,soil_temp,soil_moisture,video_file,aud
 
 ---
 
-## 🔋 Power Consumption
+## Power Consumption
 
 | Mode | Current | Duration (3000mAh) |
 |------|---------|-------------------|
@@ -257,7 +257,7 @@ timestamp,detection_num,air_temp,humidity,soil_temp,soil_moisture,video_file,aud
 
 ---
 
-## 📚 Documentation
+## Documentation
 
 | Document | Description |
 |----------|-------------|
@@ -268,7 +268,7 @@ timestamp,detection_num,air_temp,humidity,soil_temp,soil_moisture,video_file,aud
 
 ---
 
-## 🐛 Troubleshooting
+## Troubleshooting
 
 | Problem | Solution |
 |---------|----------|
@@ -284,7 +284,7 @@ timestamp,detection_num,air_temp,humidity,soil_temp,soil_moisture,video_file,aud
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
 
@@ -296,28 +296,28 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ---
 
-## 📄 License
+## License
 
 This project is licensed under **Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0)**.
 
 **You can:**
-- ✅ Use for research and education
-- ✅ Modify and build upon
-- ✅ Share with others
+- Use for research and education
+- Modify and build upon
+- Share with others
 
 **You must:**
-- 📝 Give attribution (credit the original authors)
-- 🔄 Share modifications under the same license
+- Give attribution (credit the original authors)
+- Share modifications under the same license
 
 **You cannot:**
-- ❌ Use commercially without permission
-- ❌ Remove attribution
+- Use commercially without permission
+- Remove attribution
 
 See the [LICENSE](LICENSE) file for details. For commercial licensing, contact Penn State University.
 
 ---
 
-## 🙏 Acknowledgments
+## Acknowledgments
 
 - **Penn State University** - Huck Institutes of the Life Sciences
 - **CSIR-CRI Ghana** - Crops Research Institute
@@ -326,7 +326,7 @@ See the [LICENSE](LICENSE) file for details. For commercial licensing, contact P
 
 ---
 
-## 📧 Contact
+## Contact
 
 **Project Lead:** Dr. Edward Idun Amoah  
 **Institution:** Penn State University  
