@@ -71,6 +71,9 @@ SmartTrap is a low-cost IoT device that automates the monitoring of Fall Armywor
 | IR Receiver | 38kHz module | Beam-break receiver |
 | Button | 4-pin tactile switch | User input |
 
+
+![Alt text](hardware_wirring.jpeg)
+
 ### Resistors Required (4 total)
 
 | Value | Color Code | Purpose | Connection |
