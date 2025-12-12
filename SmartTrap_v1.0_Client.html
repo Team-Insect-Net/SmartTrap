@@ -1,0 +1,1375 @@
+<!--
+  SmartTrap v1.0 Web Client
+  
+  Copyright (c) 2024 Penn State University / CSIR-CRI Ghana
+  Licensed under CC BY-NC-SA 4.0
+  https://creativecommons.org/licenses/by-nc-sa/4.0/
+  
+  Attribution required. Non-commercial use only.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SmartTrap v1.0 - Monitor</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        }
+        
+        body {
+            margin: 0;
+            padding: 20px;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            color: #fff;
+        }
+        
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        
+        h1 {
+            text-align: center;
+            margin-bottom: 5px;
+            color: #4ecca3;
+        }
+        
+        .subtitle {
+            text-align: center;
+            color: #888;
+            margin-bottom: 20px;
+        }
+        
+        .card {
+            background: rgba(255,255,255,0.1);
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+            backdrop-filter: blur(10px);
+        }
+        
+        .card h2 {
+            margin-top: 0;
+            color: #4ecca3;
+            font-size: 1.2em;
+            border-bottom: 1px solid rgba(255,255,255,0.2);
+            padding-bottom: 10px;
+        }
+        
+        .status-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+        }
+        
+        .status-item {
+            background: rgba(0,0,0,0.2);
+            padding: 15px;
+            border-radius: 8px;
+            text-align: center;
+        }
+        
+        .status-item .label {
+            font-size: 0.85em;
+            color: #888;
+        }
+        
+        .status-item .value {
+            font-size: 1.5em;
+            font-weight: bold;
+            margin-top: 5px;
+        }
+        
+        .status-item.ok { border-left: 4px solid #4ecca3; }
+        .status-item.fail { border-left: 4px solid #ff6b6b; }
+        .status-item.warn { border-left: 4px solid #ffd93d; }
+        
+        button {
+            background: #4ecca3;
+            color: #1a1a2e;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-size: 1em;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+        
+        button:hover {
+            background: #3db892;
+            transform: translateY(-2px);
+        }
+        
+        button:disabled {
+            background: #555;
+            cursor: not-allowed;
+            transform: none;
+        }
+        
+        button.danger {
+            background: #ff6b6b;
+        }
+        
+        button.secondary {
+            background: #666;
+            color: #fff;
+        }
+        
+        .btn-row {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+        
+        #connectBtn {
+            width: 100%;
+            padding: 15px;
+            font-size: 1.2em;
+        }
+        
+        .connected #connectBtn {
+            background: #ff6b6b;
+        }
+        
+        #log {
+            background: #000;
+            color: #0f0;
+            padding: 15px;
+            border-radius: 8px;
+            height: 150px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 0.9em;
+        }
+        
+        /* Authentication styles */
+        .auth-section {
+            background: rgba(255,200,0,0.1);
+            border: 1px solid #ffd93d;
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 15px;
+        }
+        
+        .auth-section.authenticated {
+            background: rgba(78,204,163,0.1);
+            border-color: #4ecca3;
+        }
+        
+        .auth-section h3 {
+            margin: 0 0 10px 0;
+            color: #ffd93d;
+            font-size: 1em;
+        }
+        
+        .auth-section.authenticated h3 {
+            color: #4ecca3;
+        }
+        
+        .auth-form {
+            display: flex;
+            gap: 10px;
+        }
+        
+        .auth-form input {
+            flex: 1;
+            padding: 10px;
+            border: none;
+            border-radius: 6px;
+            background: rgba(0,0,0,0.3);
+            color: #fff;
+            font-size: 1em;
+        }
+        
+        .auth-form input::placeholder {
+            color: #666;
+        }
+        
+        .protected-notice {
+            color: #ffd93d;
+            font-size: 0.9em;
+            text-align: center;
+            padding: 20px;
+        }
+        
+        .file-browser {
+            background: rgba(0,0,0,0.3);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        
+        .path-bar {
+            background: rgba(0,0,0,0.3);
+            padding: 10px 15px;
+            font-family: monospace;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .path-bar span {
+            flex: 1;
+            color: #4ecca3;
+        }
+        
+        .file-list {
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        
+        .file-item {
+            display: flex;
+            align-items: center;
+            padding: 12px 15px;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        
+        .file-item:hover {
+            background: rgba(255,255,255,0.1);
+        }
+        
+        .file-item .icon {
+            width: 30px;
+            font-size: 1.2em;
+        }
+        
+        .file-item .name {
+            flex: 1;
+        }
+        
+        .file-item .size {
+            color: #888;
+            font-size: 0.9em;
+        }
+        
+        .file-item .actions {
+            display: flex;
+            gap: 5px;
+        }
+        
+        .file-item .actions button {
+            padding: 5px 10px;
+            font-size: 0.8em;
+        }
+        
+        .progress-bar {
+            background: rgba(0,0,0,0.3);
+            border-radius: 4px;
+            height: 20px;
+            overflow: hidden;
+            margin: 10px 0;
+            display: none;
+        }
+        
+        .progress-bar .fill {
+            background: #4ecca3;
+            height: 100%;
+            width: 0%;
+            transition: width 0.3s;
+        }
+        
+        .progress-bar.active {
+            display: block;
+        }
+        
+        .sensors-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 15px;
+        }
+        
+        @media (max-width: 600px) {
+            .sensors-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+        
+        /* Info rows */
+        .info-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin-bottom: 8px;
+            font-size: 0.9em;
+        }
+        .info-label {
+            color: #888;
+        }
+        .info-value {
+            color: #4CAF50;
+            font-weight: bold;
+            margin-right: 15px;
+        }
+        
+        /* Detection box */
+        .detection-box {
+            background: linear-gradient(135deg, #1a3a1a, #2a5a2a);
+            border-radius: 10px;
+            padding: 20px;
+            text-align: center;
+            margin: 15px 0;
+        }
+        .det-label {
+            color: #aaa;
+            font-size: 0.9em;
+            margin-bottom: 5px;
+        }
+        .det-count {
+            font-size: 3em;
+            font-weight: bold;
+            color: #4CAF50;
+        }
+        
+        /* Component grid */
+        .component-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 8px;
+            margin: 10px 0;
+        }
+        @media (max-width: 600px) {
+            .component-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+        .comp-item {
+            background: #2a2a2a;
+            border-radius: 6px;
+            padding: 8px 12px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-left: 3px solid #555;
+        }
+        .comp-item.ok { border-left-color: #4CAF50; }
+        .comp-item.fail { border-left-color: #f44336; }
+        .comp-item.warn { border-left-color: #ff9800; }
+        .comp-name { color: #ccc; font-size: 0.85em; }
+        .comp-val { font-weight: bold; }
+        .comp-item.ok .comp-val { color: #4CAF50; }
+        .comp-item.fail .comp-val { color: #f44336; }
+        .comp-item.warn .comp-val { color: #ff9800; }
+        
+        /* Storage bar */
+        .storage-info { margin: 10px 0; }
+        .storage-bar {
+            background: #333;
+            border-radius: 10px;
+            height: 20px;
+            overflow: hidden;
+            margin-bottom: 5px;
+        }
+        .storage-used {
+            background: linear-gradient(90deg, #4CAF50, #8BC34A);
+            height: 100%;
+            transition: width 0.3s;
+        }
+        .storage-text {
+            font-size: 0.85em;
+            color: #aaa;
+            text-align: center;
+        }
+        
+        /* Memory info */
+        .memory-info, .power-info {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 20px;
+            margin: 10px 0;
+        }
+        .mem-item, .pwr-item {
+            color: #aaa;
+            font-size: 0.9em;
+        }
+        .mem-item strong, .pwr-item strong {
+            color: #4CAF50;
+        }
+        
+        /* Sensor items */
+        .sensor-item {
+            background: #2a2a2a;
+            border-radius: 10px;
+            padding: 15px;
+            text-align: center;
+        }
+        .sensor-icon {
+            font-size: 1.5em;
+            margin-bottom: 5px;
+        }
+        .sensor-label {
+            color: #888;
+            font-size: 0.85em;
+            margin-bottom: 5px;
+        }
+        .sensor-value {
+            font-size: 1.4em;
+            font-weight: bold;
+            color: #4CAF50;
+        }
+        
+        h3 {
+            color: #aaa;
+            font-size: 0.95em;
+            margin: 15px 0 8px 0;
+            border-bottom: 1px solid #333;
+            padding-bottom: 5px;
+        }
+        
+        /* Auto refresh */
+        .auto-refresh-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid #333;
+        }
+        .auto-refresh-row label {
+            color: #888;
+            font-size: 0.9em;
+        }
+        .auto-refresh-row select {
+            background: #2a2a2a;
+            color: #fff;
+            border: 1px solid #444;
+            border-radius: 5px;
+            padding: 5px 10px;
+            font-size: 0.9em;
+        }
+        .countdown {
+            color: #4CAF50;
+            font-size: 0.85em;
+            margin-left: auto;
+        }
+        
+        .hidden {
+            display: none !important;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🦋 SmartTrap</h1>
+        <p class="subtitle">Version 1.0 - Field Monitor</p>
+        
+        <!-- Connection -->
+        <div class="card">
+            <button id="connectBtn" onclick="toggleConnection()">Connect to Trap</button>
+        </div>
+        
+        <!-- Status (always visible when connected) -->
+        <div class="card" id="statusCard" style="display:none">
+            <h2>📊 Device Status</h2>
+            
+            <!-- Device Info Row -->
+            <div class="info-row">
+                <span class="info-label">Device:</span>
+                <span class="info-value" id="deviceName">-</span>
+                <span class="info-label">Firmware:</span>
+                <span class="info-value" id="firmwareVer">-</span>
+                <span class="info-label">Uptime:</span>
+                <span class="info-value" id="uptime">-</span>
+            </div>
+            <div class="info-row">
+                <span class="info-label">RTC Time:</span>
+                <span class="info-value" id="rtcTime">-</span>
+                <span class="info-label">Schedule:</span>
+                <span class="info-value" id="schedule">-</span>
+                <span class="info-label">Mode:</span>
+                <span class="info-value" id="activeMode">-</span>
+            </div>
+            
+            <!-- Detection Counter (prominent) -->
+            <div class="detection-box">
+                <div class="det-label">Total Detections</div>
+                <div class="det-count" id="detCount">-</div>
+            </div>
+            
+            <!-- Component Status Grid -->
+            <h3>🔧 Component Status</h3>
+            <div class="component-grid">
+                <div class="comp-item" id="compLcd"><span class="comp-name">LCD</span><span class="comp-val" id="lcdVal">-</span></div>
+                <div class="comp-item" id="compRtc"><span class="comp-name">RTC</span><span class="comp-val" id="rtcVal">-</span></div>
+                <div class="comp-item" id="compDht"><span class="comp-name">DHT11</span><span class="comp-val" id="dhtVal">-</span></div>
+                <div class="comp-item" id="compDs18"><span class="comp-name">DS18B20</span><span class="comp-val" id="ds18Val">-</span></div>
+                <div class="comp-item" id="compCam"><span class="comp-name">Camera</span><span class="comp-val" id="camVal">-</span></div>
+                <div class="comp-item" id="compMic"><span class="comp-name">Microphone</span><span class="comp-val" id="micVal">-</span></div>
+                <div class="comp-item" id="compSd"><span class="comp-name">SD Card</span><span class="comp-val" id="sdVal">-</span></div>
+                <div class="comp-item" id="compBle"><span class="comp-name">BLE</span><span class="comp-val" id="bleVal">-</span></div>
+                <div class="comp-item" id="compIr"><span class="comp-name">IR Sensor</span><span class="comp-val" id="irVal">-</span></div>
+            </div>
+            
+            <!-- SD Card Usage -->
+            <h3>💾 Storage</h3>
+            <div class="storage-info">
+                <div class="storage-bar">
+                    <div class="storage-used" id="storageBar" style="width:0%"></div>
+                </div>
+                <div class="storage-text">
+                    <span id="storageUsed">-</span> / <span id="storageTotal">-</span> 
+                    (<span id="storageFree">-</span> free)
+                </div>
+            </div>
+            
+            <!-- Memory Info -->
+            <h3>🧠 Memory</h3>
+            <div class="memory-info">
+                <span class="mem-item">Heap: <strong id="heapFree">-</strong></span>
+                <span class="mem-item">PSRAM: <strong id="psramFree">-</strong></span>
+                <span class="mem-item">Min Heap: <strong id="minHeap">-</strong></span>
+            </div>
+            
+            <!-- Battery (placeholder for future) -->
+            <h3>🔋 Power</h3>
+            <div class="power-info">
+                <span class="pwr-item">Battery: <strong id="batteryPct">--</strong></span>
+                <span class="pwr-item">Voltage: <strong id="batteryVolt">--</strong></span>
+                <span class="pwr-item">Charging: <strong id="batteryChg">--</strong></span>
+            </div>
+            
+            <div class="btn-row" style="margin-top:15px">
+                <button onclick="refreshDiagnostics()">🔄 Refresh All</button>
+                <button onclick="sendCommand('RECORD')" class="danger" id="btnManualRecord" disabled>📹 Manual Record</button>
+            </div>
+            <div class="auto-refresh-row">
+                <label for="autoRefresh">Auto Refresh:</label>
+                <select id="autoRefresh" onchange="setAutoRefresh(this.value)">
+                    <option value="0">Off</option>
+                    <option value="10000">10 seconds</option>
+                    <option value="30000">30 seconds</option>
+                    <option value="60000" selected>1 minute</option>
+                    <option value="300000">5 minutes</option>
+                    <option value="600000">10 minutes</option>
+                    <option value="1800000">30 minutes</option>
+                </select>
+                <span id="refreshCountdown" class="countdown"></span>
+            </div>
+        </div>
+        
+        <!-- Sensors (always visible when connected) -->
+        <div class="card" id="sensorsCard" style="display:none">
+            <h2>🌡️ Environmental Sensors</h2>
+            <div class="sensors-grid">
+                <div class="sensor-item">
+                    <div class="sensor-icon">🌡️</div>
+                    <div class="sensor-label">Air Temperature</div>
+                    <div class="sensor-value" id="airTemp">-</div>
+                </div>
+                <div class="sensor-item">
+                    <div class="sensor-icon">💧</div>
+                    <div class="sensor-label">Humidity</div>
+                    <div class="sensor-value" id="humidity">-</div>
+                </div>
+                <div class="sensor-item">
+                    <div class="sensor-icon">🌱</div>
+                    <div class="sensor-label">Soil Temperature</div>
+                    <div class="sensor-value" id="soilTemp">-</div>
+                </div>
+                <div class="sensor-item">
+                    <div class="sensor-icon">💦</div>
+                    <div class="sensor-label">Soil Moisture</div>
+                    <div class="sensor-value" id="soilMoist">-</div>
+                </div>
+            </div>
+            <p style="color:#888;font-size:0.9em;margin-top:10px" id="sensorTime">Last reading: -</p>
+            <button onclick="sendCommand('SENSORS')" style="margin-top:10px">🔄 Read Sensors</button>
+        </div>
+        
+        <!-- Authentication Section -->
+        <div class="card" id="authCard" style="display:none">
+            <h2>🔐 Authentication</h2>
+            
+            <!-- Login form (shown when not authenticated) -->
+            <div id="loginSection" class="auth-section">
+                <h3>🔒 Login Required for Data Access</h3>
+                <p style="color:#888;font-size:0.9em;margin-bottom:10px">
+                    Enter password to browse files, download data, or reset the device.
+                </p>
+                <div class="auth-form">
+                    <input type="password" id="passwordInput" placeholder="Enter password" onkeypress="if(event.key==='Enter')authenticate()">
+                    <button onclick="authenticate()">Login</button>
+                </div>
+            </div>
+            
+            <!-- Authenticated status (shown when authenticated) -->
+            <div id="loggedInSection" class="auth-section authenticated hidden">
+                <h3>✓ Authenticated</h3>
+                <p style="color:#888;font-size:0.9em;margin-bottom:10px">
+                    You have full access to files and data.
+                </p>
+                <button onclick="logout()" class="secondary">Logout</button>
+            </div>
+        </div>
+        
+        <!-- File Browser (protected - only visible when authenticated) -->
+        <div class="card" id="filesCard" style="display:none">
+            <h2>📁 SD Card Browser</h2>
+            
+            <div id="filesProtected" class="protected-notice">
+                🔒 Please login to access files
+            </div>
+            
+            <div id="filesContent" class="hidden">
+                <div class="file-browser">
+                    <div class="path-bar">
+                        <button onclick="navigateUp()" class="secondary" style="padding:5px 10px">⬆️ Up</button>
+                        <span id="currentPath">/</span>
+                        <button onclick="refreshFiles()" class="secondary" style="padding:5px 10px">🔄</button>
+                    </div>
+                    <div class="file-list" id="fileList">
+                        <div class="file-item" style="color:#888;justify-content:center">
+                            Click refresh to load files
+                        </div>
+                    </div>
+                </div>
+                <div class="progress-bar" id="progressBar">
+                    <div class="fill" id="progressFill"></div>
+                </div>
+                <p id="transferStatus" style="color:#888;font-size:0.9em;margin-top:10px"></p>
+                
+                <!-- Reset Button -->
+                <div style="margin-top:15px; padding-top:15px; border-top:1px solid rgba(255,255,255,0.2)">
+                    <button onclick="resetDevice()" class="danger" style="width:100%">⚠️ RESET - Delete All Data</button>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Log -->
+        <div class="card">
+            <h2>📝 Activity Log</h2>
+            <div id="log"></div>
+        </div>
+    </div>
+    
+    <script>
+        // BLE UUIDs
+        const SERVICE_UUID = '4fafc201-1fb5-459e-8fcc-c5c9c331914b';
+        const TX_UUID = 'beb5483e-36e1-4688-b7f5-ea07361b26a8';
+        const RX_UUID = 'beb5483e-36e1-4688-b7f5-ea07361b26a9';
+        
+        let device = null;
+        let server = null;
+        let txCharacteristic = null;
+        let rxCharacteristic = null;
+        let connected = false;
+        let authenticated = false;
+        
+        // File transfer state
+        let transferring = false;
+        let fileData = [];
+        let fileName = '';
+        let fileSize = 0;
+        let receivedBytes = 0;
+        
+        // Current path
+        let currentPath = '/';
+        
+        function log(msg) {
+            const logDiv = document.getElementById('log');
+            const time = new Date().toLocaleTimeString();
+            logDiv.innerHTML += `[${time}] ${msg}\n`;
+            logDiv.scrollTop = logDiv.scrollHeight;
+        }
+        
+        async function toggleConnection() {
+            if (connected) {
+                disconnect();
+            } else {
+                await connect();
+            }
+        }
+        
+        async function connect() {
+            try {
+                log('Searching for SmartTrap device...');
+                
+                // Search for SmartTrap devices
+                try {
+                    device = await navigator.bluetooth.requestDevice({
+                        filters: [{ namePrefix: 'SmartTrap' }],
+                        optionalServices: [SERVICE_UUID]
+                    });
+                } catch (e) {
+                    throw e;
+                }
+                
+                log(`Found: ${device.name}`);
+                
+                device.addEventListener('gattserverdisconnected', onDisconnected);
+                
+                server = await device.gatt.connect();
+                const service = await server.getPrimaryService(SERVICE_UUID);
+                
+                txCharacteristic = await service.getCharacteristic(TX_UUID);
+                rxCharacteristic = await service.getCharacteristic(RX_UUID);
+                
+                await txCharacteristic.startNotifications();
+                txCharacteristic.addEventListener('characteristicvaluechanged', onDataReceived);
+                
+                connected = true;
+                authenticated = false;
+                
+                document.body.classList.add('connected');
+                document.getElementById('connectBtn').textContent = 'Disconnect';
+                document.getElementById('statusCard').style.display = 'block';
+                document.getElementById('sensorsCard').style.display = 'block';
+                document.getElementById('authCard').style.display = 'block';
+                document.getElementById('filesCard').style.display = 'block';
+                
+                updateAuthUI();
+                
+                log('Connected!');
+                
+                // Get initial status and diagnostics
+                setTimeout(() => {
+                    sendCommand('STATUS');
+                    setTimeout(() => sendCommand('DIAG'), 100);
+                    setTimeout(() => sendCommand('SENSORS'), 200);
+                    sendCommand('AUTHSTATUS');
+                    
+                    // Start auto-refresh if enabled
+                    const interval = document.getElementById('autoRefresh').value;
+                    if (interval !== '0') {
+                        setAutoRefresh(interval);
+                    }
+                }, 500);
+                
+            } catch (error) {
+                log(`Error: ${error.message}`);
+            }
+        }
+        
+        function disconnect() {
+            if (device && device.gatt.connected) {
+                device.gatt.disconnect();
+            }
+            onDisconnected();
+        }
+        
+        function onDisconnected() {
+            connected = false;
+            authenticated = false;
+            stopAutoRefresh();
+            document.body.classList.remove('connected');
+            document.getElementById('connectBtn').textContent = 'Connect to Trap';
+            document.getElementById('statusCard').style.display = 'none';
+            document.getElementById('sensorsCard').style.display = 'none';
+            document.getElementById('authCard').style.display = 'none';
+            document.getElementById('filesCard').style.display = 'none';
+            updateAuthUI();
+            log('Disconnected');
+        }
+        
+        async function sendCommand(cmd) {
+            if (!connected || !rxCharacteristic) {
+                log('Not connected');
+                return;
+            }
+            
+            try {
+                const encoder = new TextEncoder();
+                await rxCharacteristic.writeValue(encoder.encode(cmd));
+                log(`Sent: ${cmd}`);
+            } catch (error) {
+                log(`Send error: ${error.message}`);
+            }
+        }
+        
+        function authenticate() {
+            const password = document.getElementById('passwordInput').value;
+            if (!password) {
+                log('Please enter a password');
+                return;
+            }
+            sendCommand('AUTH:' + password);
+            document.getElementById('passwordInput').value = '';
+        }
+        
+        function logout() {
+            sendCommand('LOGOUT');
+        }
+        
+        function updateAuthUI() {
+            const loginSection = document.getElementById('loginSection');
+            const loggedInSection = document.getElementById('loggedInSection');
+            const filesProtected = document.getElementById('filesProtected');
+            const filesContent = document.getElementById('filesContent');
+            const authVal = document.getElementById('authVal');
+            const authStatus = document.getElementById('authStatus');
+            const btnManualRecord = document.getElementById('btnManualRecord');
+            
+            if (authenticated) {
+                loginSection.classList.add('hidden');
+                loggedInSection.classList.remove('hidden');
+                filesProtected.classList.add('hidden');
+                filesContent.classList.remove('hidden');
+                authVal.textContent = 'YES';
+                authStatus.classList.remove('fail', 'warn');
+                authStatus.classList.add('ok');
+                btnManualRecord.disabled = false;
+            } else {
+                loginSection.classList.remove('hidden');
+                loggedInSection.classList.add('hidden');
+                filesProtected.classList.remove('hidden');
+                filesContent.classList.add('hidden');
+                authVal.textContent = 'NO';
+                authStatus.classList.remove('ok');
+                authStatus.classList.add('warn');
+                btnManualRecord.disabled = true;
+            }
+        }
+        
+        function refreshFiles() {
+            if (!authenticated) {
+                log('Authentication required');
+                return;
+            }
+            clearFileList();
+            sendCommand('LIST');
+        }
+        
+        function resetDevice() {
+            if (!authenticated) {
+                log('Authentication required');
+                return;
+            }
+            
+            if (confirm('⚠️ WARNING: This will delete ALL event recordings and logs!\n\nAre you sure you want to reset the device?')) {
+                if (confirm('This action cannot be undone. Type "RESET" to confirm.\n\nClick OK to proceed with reset.')) {
+                    sendCommand('RESET');
+                }
+            }
+        }
+        
+        function onDataReceived(event) {
+            const value = new TextDecoder().decode(event.target.value);
+            
+            // Handle file transfer data
+            if (transferring && value.startsWith('DATA:')) {
+                const hexData = value.substring(5);
+                const bytes = hexToBytes(hexData);
+                fileData.push(...bytes);
+                receivedBytes += bytes.length;
+                
+                const percent = Math.round((receivedBytes / fileSize) * 100);
+                document.getElementById('progressFill').style.width = percent + '%';
+                document.getElementById('transferStatus').textContent = 
+                    `Downloading: ${percent}% (${receivedBytes}/${fileSize} bytes)`;
+                return;
+            }
+            
+            if (value === 'FILE_END') {
+                completeTransfer();
+                return;
+            }
+            
+            if (value.startsWith('FILE_START:')) {
+                const parts = value.substring(11).split(':');
+                fileName = parts[0];
+                fileSize = parseInt(parts[1]);
+                fileData = [];
+                receivedBytes = 0;
+                transferring = true;
+                
+                document.getElementById('progressBar').classList.add('active');
+                document.getElementById('progressFill').style.width = '0%';
+                document.getElementById('transferStatus').textContent = `Starting download: ${fileName}`;
+                log(`Downloading: ${fileName} (${fileSize} bytes)`);
+                return;
+            }
+            
+            // Authentication responses
+            if (value === 'AUTH:OK') {
+                authenticated = true;
+                updateAuthUI();
+                log('✓ Authentication successful');
+                refreshFiles();
+                return;
+            }
+            
+            if (value === 'AUTH:FAIL') {
+                authenticated = false;
+                updateAuthUI();
+                log('✗ Authentication failed - wrong password');
+                return;
+            }
+            
+            if (value === 'AUTH:YES') {
+                authenticated = true;
+                updateAuthUI();
+                return;
+            }
+            
+            if (value === 'AUTH:NO') {
+                authenticated = false;
+                updateAuthUI();
+                return;
+            }
+            
+            if (value === 'LOGOUT:OK') {
+                authenticated = false;
+                updateAuthUI();
+                log('Logged out');
+                return;
+            }
+            
+            if (value.startsWith('ERROR:Auth')) {
+                log('⚠️ ' + value);
+                return;
+            }
+            
+            // Reset response
+            if (value.startsWith('RESET:OK')) {
+                log('✓ Device reset complete');
+                alert('Device reset complete!\n\nAll recordings and logs have been deleted.');
+                refreshFiles();
+                sendCommand('STATUS');
+                return;
+            }
+            
+            // Parse other responses
+            if (value.startsWith('STATUS:')) {
+                parseStatus(value.substring(7));
+            }
+            else if (value.startsWith('DIAG:')) {
+                parseDiagnostics(value.substring(5));
+            }
+            else if (value.startsWith('MEMORY:')) {
+                parseMemory(value.substring(7));
+            }
+            else if (value.startsWith('SDINFO:')) {
+                parseSDInfo(value.substring(7));
+            }
+            else if (value.startsWith('BATTERY:')) {
+                parseBattery(value.substring(8));
+            }
+            else if (value.startsWith('SENSORS:')) {
+                parseSensors(value.substring(8));
+            }
+            else if (value.startsWith('PATH:')) {
+                currentPath = value.substring(5);
+                document.getElementById('currentPath').textContent = currentPath;
+            }
+            else if (value.startsWith('DIR:')) {
+                addFileItem(value.substring(4), 'dir');
+            }
+            else if (value.startsWith('FILE:')) {
+                const parts = value.substring(5).split(':');
+                addFileItem(parts[0], 'file', parts[1]);
+            }
+            else if (value === 'LIST_END') {
+                log('File list loaded');
+            }
+            else if (value.startsWith('DELETED:')) {
+                log(`Deleted: ${value.substring(8)}`);
+                refreshFiles();
+            }
+            else if (value.startsWith('DETECTIONS:')) {
+                document.getElementById('detCount').textContent = value.substring(11);
+            }
+            else if (value === 'CANCELLED') {
+                transferring = false;
+                document.getElementById('progressBar').classList.remove('active');
+                document.getElementById('transferStatus').textContent = 'Transfer cancelled';
+                log('Transfer cancelled');
+            }
+            else {
+                // Don't log every message, just unknown ones
+                if (!value.startsWith('OK') && !value.startsWith('CHUNK')) {
+                    log(`Received: ${value}`);
+                }
+            }
+        }
+        
+        function parseStatus(data) {
+            const parts = data.split(',');
+            const status = {};
+            parts.forEach(p => {
+                const [k, v] = p.split('=');
+                status[k] = v;
+            });
+            
+            // Device info
+            if (status.name) document.getElementById('deviceName').textContent = status.name;
+            if (status.v) document.getElementById('firmwareVer').textContent = 'v' + status.v;
+            if (status.uptime) document.getElementById('uptime').textContent = status.uptime;
+            if (status.time) document.getElementById('rtcTime').textContent = status.time;
+            if (status.sched) document.getElementById('schedule').textContent = status.sched;
+            if (status.active) {
+                const mode = status.active === 'YES' ? 'ACTIVE' : 'SLEEPING';
+                const modeEl = document.getElementById('activeMode');
+                modeEl.textContent = mode;
+                modeEl.style.color = mode === 'ACTIVE' ? '#4CAF50' : '#ff9800';
+            }
+            
+            // Detection count
+            if (status.det) {
+                document.getElementById('detCount').textContent = status.det;
+            }
+            
+            // Auth status
+            if (status.auth) {
+                authenticated = (status.auth === 'YES');
+                updateAuthUI();
+            }
+            
+            log('Status updated');
+        }
+        
+        function parseDiagnostics(data) {
+            const parts = data.split(',');
+            const diag = {};
+            parts.forEach(p => {
+                const [k, v] = p.split('=');
+                diag[k] = v;
+            });
+            
+            // Update component status
+            updateComponent('compLcd', 'lcdVal', diag.lcd);
+            updateComponent('compRtc', 'rtcVal', diag.rtc);
+            updateComponent('compDht', 'dhtVal', diag.dht);
+            updateComponent('compDs18', 'ds18Val', diag.ds18);
+            updateComponent('compCam', 'camVal', diag.cam);
+            updateComponent('compMic', 'micVal', diag.mic);
+            updateComponent('compSd', 'sdVal', diag.sd);
+            updateComponent('compBle', 'bleVal', diag.ble);
+            updateComponent('compIr', 'irVal', diag.ir);
+            
+            log('Diagnostics updated');
+        }
+        
+        function updateComponent(itemId, valId, value) {
+            const item = document.getElementById(itemId);
+            const val = document.getElementById(valId);
+            if (!item || !val) return;
+            
+            val.textContent = value || '-';
+            item.classList.remove('ok', 'fail', 'warn');
+            
+            if (value === 'OK' || value === 'CLEAR') {
+                item.classList.add('ok');
+            } else if (value === 'FAIL') {
+                item.classList.add('fail');
+            } else if (value === 'BLOCKED') {
+                item.classList.add('warn');
+            }
+        }
+        
+        function parseMemory(data) {
+            const parts = data.split(',');
+            const mem = {};
+            parts.forEach(p => {
+                const [k, v] = p.split('=');
+                mem[k] = v;
+            });
+            
+            if (mem.heap) document.getElementById('heapFree').textContent = mem.heap;
+            if (mem.psram) document.getElementById('psramFree').textContent = mem.psram;
+            if (mem.minHeap) document.getElementById('minHeap').textContent = mem.minHeap;
+        }
+        
+        function parseSDInfo(data) {
+            const parts = data.split(',');
+            const sd = {};
+            parts.forEach(p => {
+                const [k, v] = p.split('=');
+                sd[k] = v;
+            });
+            
+            if (sd.total) document.getElementById('storageTotal').textContent = sd.total;
+            if (sd.used) document.getElementById('storageUsed').textContent = sd.used;
+            if (sd.free) document.getElementById('storageFree').textContent = sd.free;
+            if (sd.pct) {
+                const pct = parseInt(sd.pct);
+                const bar = document.getElementById('storageBar');
+                bar.style.width = pct + '%';
+                // Change color based on usage
+                if (pct > 90) {
+                    bar.style.background = 'linear-gradient(90deg, #f44336, #ff5722)';
+                } else if (pct > 75) {
+                    bar.style.background = 'linear-gradient(90deg, #ff9800, #ffc107)';
+                } else {
+                    bar.style.background = 'linear-gradient(90deg, #4CAF50, #8BC34A)';
+                }
+            }
+        }
+        
+        function parseBattery(data) {
+            const parts = data.split(',');
+            const bat = {};
+            parts.forEach(p => {
+                const [k, v] = p.split('=');
+                bat[k] = v;
+            });
+            
+            if (bat.pct) document.getElementById('batteryPct').textContent = bat.pct;
+            if (bat.voltage) document.getElementById('batteryVolt').textContent = bat.voltage;
+            if (bat.charging) document.getElementById('batteryChg').textContent = bat.charging;
+        }
+        
+        // Auto-refresh timer
+        let autoRefreshInterval = null;
+        let autoRefreshCountdown = null;
+        let countdownSeconds = 0;
+        
+        function setAutoRefresh(interval) {
+            // Clear existing timers
+            if (autoRefreshInterval) {
+                clearInterval(autoRefreshInterval);
+                autoRefreshInterval = null;
+            }
+            if (autoRefreshCountdown) {
+                clearInterval(autoRefreshCountdown);
+                autoRefreshCountdown = null;
+            }
+            
+            const countdownEl = document.getElementById('refreshCountdown');
+            
+            if (interval === '0' || !connected) {
+                countdownEl.textContent = '';
+                return;
+            }
+            
+            const ms = parseInt(interval);
+            countdownSeconds = ms / 1000;
+            
+            // Update countdown display
+            updateCountdown();
+            autoRefreshCountdown = setInterval(() => {
+                countdownSeconds--;
+                if (countdownSeconds <= 0) {
+                    countdownSeconds = ms / 1000;
+                }
+                updateCountdown();
+            }, 1000);
+            
+            // Set refresh interval
+            autoRefreshInterval = setInterval(() => {
+                if (connected) {
+                    refreshDiagnostics();
+                }
+            }, ms);
+            
+            log(`Auto-refresh set to ${ms / 1000} seconds`);
+        }
+        
+        function updateCountdown() {
+            const countdownEl = document.getElementById('refreshCountdown');
+            if (countdownSeconds > 60) {
+                const mins = Math.floor(countdownSeconds / 60);
+                const secs = countdownSeconds % 60;
+                countdownEl.textContent = `Next refresh in ${mins}m ${secs}s`;
+            } else {
+                countdownEl.textContent = `Next refresh in ${countdownSeconds}s`;
+            }
+        }
+        
+        function stopAutoRefresh() {
+            if (autoRefreshInterval) {
+                clearInterval(autoRefreshInterval);
+                autoRefreshInterval = null;
+            }
+            if (autoRefreshCountdown) {
+                clearInterval(autoRefreshCountdown);
+                autoRefreshCountdown = null;
+            }
+            const countdownEl = document.getElementById('refreshCountdown');
+            if (countdownEl) countdownEl.textContent = '';
+        }
+        
+        function refreshDiagnostics() {
+            if (!connected) return;
+            sendCommand('STATUS');
+            setTimeout(() => sendCommand('DIAG'), 100);
+            setTimeout(() => sendCommand('SENSORS'), 200);
+            log('Refreshing all diagnostics...');
+            
+            // Reset countdown
+            const interval = document.getElementById('autoRefresh').value;
+            if (interval !== '0') {
+                countdownSeconds = parseInt(interval) / 1000;
+            }
+        }
+        
+        function updateStatusItem(itemId, valId, value) {
+            const item = document.getElementById(itemId);
+            const val = document.getElementById(valId);
+            if (!item || !val) return;
+            val.textContent = value || '-';
+            
+            item.classList.remove('ok', 'fail', 'warn');
+            if (value === 'OK' || value === 'YES') item.classList.add('ok');
+            else if (value === 'FAIL' || value === 'NO') item.classList.add('fail');
+            else item.classList.add('warn');
+        }
+        
+        function parseSensors(data) {
+            const parts = data.split(',');
+            const sensors = {};
+            parts.forEach(p => {
+                const [k, v] = p.split('=');
+                sensors[k] = v;
+            });
+            
+            if (sensors.airT && sensors.airT !== '-999.0') {
+                document.getElementById('airTemp').textContent = sensors.airT + '°C';
+            } else {
+                document.getElementById('airTemp').textContent = 'N/A';
+            }
+            
+            if (sensors.hum && sensors.hum !== '-999.0') {
+                document.getElementById('humidity').textContent = sensors.hum + '%';
+            } else {
+                document.getElementById('humidity').textContent = 'N/A';
+            }
+            
+            if (sensors.soilT && sensors.soilT !== '-999.0') {
+                document.getElementById('soilTemp').textContent = sensors.soilT + '°C';
+            } else {
+                document.getElementById('soilTemp').textContent = 'N/A';
+            }
+            
+            if (sensors.soilM) {
+                const raw = parseInt(sensors.soilM);
+                const pct = Math.round(Math.max(0, Math.min(100, (4095 - raw) / 30.95)));
+                document.getElementById('soilMoist').textContent = pct + '%';
+            }
+            
+            if (sensors.time) {
+                document.getElementById('sensorTime').textContent = 'Last reading: ' + sensors.time;
+            }
+            
+            log('Sensors updated');
+        }
+        
+        function clearFileList() {
+            document.getElementById('fileList').innerHTML = '';
+        }
+        
+        function addFileItem(name, type, size) {
+            const list = document.getElementById('fileList');
+            
+            // Clear placeholder
+            if (list.querySelector('.file-item[style]')) {
+                list.innerHTML = '';
+            }
+            
+            const item = document.createElement('div');
+            item.className = 'file-item';
+            
+            const icon = type === 'dir' ? '📁' : getFileIcon(name);
+            const sizeStr = size ? formatSize(parseInt(size)) : '';
+            
+            item.innerHTML = `
+                <span class="icon">${icon}</span>
+                <span class="name">${name}</span>
+                <span class="size">${sizeStr}</span>
+                <span class="actions">
+                    ${type === 'dir' 
+                        ? `<button onclick="navigateTo('${name}')">Open</button>`
+                        : `<button onclick="downloadFile('${name}')">⬇️</button>
+                           <button onclick="deleteFile('${name}')" class="danger">🗑️</button>`
+                    }
+                </span>
+            `;
+            
+            if (type === 'dir') {
+                item.ondblclick = () => navigateTo(name);
+            }
+            
+            list.appendChild(item);
+        }
+        
+        function getFileIcon(name) {
+            const ext = name.split('.').pop().toLowerCase();
+            const icons = {
+                'csv': '📊',
+                'txt': '📝',
+                'log': '📝',
+                'jpg': '🖼️',
+                'jpeg': '🖼️',
+                'avi': '🎬',
+                'mjpeg': '🎬',
+                'wav': '🔊',
+                'raw': '🔊'
+            };
+            return icons[ext] || '📄';
+        }
+        
+        function formatSize(bytes) {
+            if (bytes < 1024) return bytes + ' B';
+            if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+            return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+        }
+        
+        function navigateTo(dir) {
+            if (!authenticated) return;
+            clearFileList();
+            sendCommand('CD:' + dir);
+        }
+        
+        function navigateUp() {
+            if (!authenticated) return;
+            clearFileList();
+            sendCommand('CD:..');
+        }
+        
+        function downloadFile(name) {
+            if (!authenticated) {
+                log('Authentication required');
+                return;
+            }
+            sendCommand('GET:' + name);
+        }
+        
+        function deleteFile(name) {
+            if (!authenticated) {
+                log('Authentication required');
+                return;
+            }
+            if (confirm(`Delete ${name}?`)) {
+                sendCommand('DELETE:' + name);
+            }
+        }
+        
+        function hexToBytes(hex) {
+            const bytes = [];
+            for (let i = 0; i < hex.length; i += 2) {
+                bytes.push(parseInt(hex.substr(i, 2), 16));
+            }
+            return bytes;
+        }
+        
+        function completeTransfer() {
+            transferring = false;
+            document.getElementById('progressBar').classList.remove('active');
+            document.getElementById('transferStatus').textContent = 'Download complete!';
+            
+            // Create blob and download
+            const blob = new Blob([new Uint8Array(fileData)], { type: 'application/octet-stream' });
+            const url = URL.createObjectURL(blob);
+            
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = fileName.split('/').pop();
+            a.click();
+            
+            URL.revokeObjectURL(url);
+            
+            log(`Downloaded: ${fileName} (${fileData.length} bytes)`);
+            
+            fileData = [];
+            fileName = '';
+            fileSize = 0;
+            receivedBytes = 0;
+        }
+    </script>
+</body>
+</html>
