@@ -3,7 +3,7 @@
  * SMARTTRAP FIRMWARE v1.0
  * ============================================================================
  * 
- * Copyright (c) 2025 Penn State University / CSIR-CRI Ghana
+ * Copyright (c) 2024 Penn State University / CSIR-CRI Ghana
  * Licensed under CC BY-NC-SA 4.0
  * https://creativecommons.org/licenses/by-nc-sa/4.0/
  * 
@@ -483,6 +483,7 @@ void initComponents();
 void initCamera();
 void initMicrophone();
 void initSDCard();
+void restoreDetectionCount();
 void setupBLE();
 void readSensors();
 void recordEvent();
@@ -973,6 +974,7 @@ void initComponents() {
     else Serial.println("FAIL");
     
     initSDCard();
+    restoreDetectionCount();  // Restore count from CSV
     initCamera();
     initMicrophone();
     setupBLE();
@@ -987,6 +989,36 @@ void initSDCard() {
         sdOK = true;
         Serial.printf("OK (%llu MB)\n", SD_MMC.totalBytes() / (1024 * 1024));
     } else Serial.println("FAIL");
+}
+
+void restoreDetectionCount() {
+    if (!sdOK) return;
+    
+    File file = SD_MMC.open("/logs/detections.csv", FILE_READ);
+    if (!file) {
+        Serial.println("[SD] No previous detections.csv - starting from 0");
+        detectionCount = 0;
+        return;
+    }
+    
+    // Count lines (excluding header)
+    unsigned long lineCount = 0;
+    bool firstLine = true;
+    
+    while (file.available()) {
+        String line = file.readStringUntil('\n');
+        if (firstLine) {
+            firstLine = false;  // Skip header
+            continue;
+        }
+        if (line.length() > 0) {
+            lineCount++;
+        }
+    }
+    file.close();
+    
+    detectionCount = lineCount;
+    Serial.printf("[SD] Restored detection count: %lu\n", detectionCount);
 }
 
 void initCamera() {
