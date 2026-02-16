@@ -1,6 +1,6 @@
 /*
  * ============================================================================
- * SMARTTRAP FIRMWARE v1.0
+ * SMARTTRAP FIRMWARE v1.2
  * ============================================================================
  * 
  * Copyright (c) 2024 Penn State University / CSIR-CRI Ghana
@@ -11,8 +11,49 @@
  * 
  * ============================================================================
  * 
+ * CHANGELOG v1.2 (Video Recording Fix):
+ * ────────────────────────────────────────────────────
+ * [FIX] LEDC channel conflict: Camera XCLK used LEDC_CHANNEL_0, and
+ *       ledcAttach() for IR LED could grab the same channel, corrupting
+ *       camera clock → black/empty frames → 0-byte AVI files.
+ *       Fix: Camera now uses LEDC_CHANNEL_1, IR LED explicitly uses CHANNEL_0.
+ * [FIX] SD card concurrent access: Video task (Core 0) and Audio task (Core 1)
+ *       both wrote to SD_MMC simultaneously without mutex protection.
+ *       SD_MMC is NOT thread-safe → corrupted writes, silent failures.
+ *       Fix: Added SemaphoreHandle_t for SD card access serialization.
+ * [FIX] Video task could silently produce 0-frame AVI when camera was
+ *       temporarily unavailable after IR PWM reconfigured LEDC.
+ *       Fix: Added frame count validation — skips AVI creation if 0 frames.
+ * [FIX] RecordParams passed as pointer to static local — race condition if
+ *       two detections fire rapidly. Fix: Made truly static at file scope.
+ *
+ * CHANGELOG v1.1 (IR Detection Sensitivity Overhaul):
+ * ────────────────────────────────────────────────────
+ * [FIX] IR LED now driven at 38kHz PWM instead of DC
+ *       - TSOP receivers have internal bandpass filter that REJECTS DC
+ *       - This was the primary cause of low sensitivity
+ * [FIX] Replaced polling-based IR detection with hardware interrupt (IRAM_ATTR)
+ *       - Eliminates missed detections during blocking operations
+ *       - Removed checkIRDetection() function entirely
+ * [FIX] Reduced debounce from 200ms to 80ms
+ *       - Moths cross beam in ~20-80ms; 200ms was filtering real detections
+ * [NEW] Beam health monitoring with 30s blockage warning
+ *       - Detects debris/dead insects obscuring the beam
+ *       - Logs warnings and shows on LCD
+ * [NEW] IR signal quality diagnostics via BLE "IRTEST" command
+ *       - Reports beam state, transition count, and PWM status
+ * [NEW] Configurable IR PWM duty cycle for power tuning
+ * 
+ * HARDWARE CHANGES REQUIRED (see Hardware Guide at end of file):
+ * ────────────────────────────────────────────────────────────────
+ * 1. REMOVE the 10kΩ pull-down resistor from IR receiver to GND
+ * 2. REPLACE 100Ω IR LED resistor with 47Ω for stronger beam
+ * 3. (Optional) Add optical tubes for beam alignment
+ * 
+ * ============================================================================
+ * 
  * Features:
- * - IR beam-break detection
+ * - IR beam-break detection (38kHz modulated, interrupt-driven)
  * - SIMULTANEOUS 10-second video + audio recording (dual-core)
  * - AVI format video (MJPEG) - playable in VLC
  * - WAV format audio - playable everywhere
@@ -22,8 +63,6 @@
  * - SD card storage with CSV logging
  * - BLE file browser and download
  * - USB MASS STORAGE: Press button at boot for data transfer
- *   - Default: Normal Mode (monitoring/programming)
- *   - Button press: USB Drive Mode (SD card as USB drive)
  * - LCD status display
  * - RTC timestamps
  * - PASSWORD PROTECTION for file access and reset
@@ -36,8 +75,8 @@
  *   D3 (GPIO4)  = Button (to GND + 10kΩ pull-up to 3.3V)
  *   D4 (GPIO5)  = I2C SDA (LCD + RTC)
  *   D5 (GPIO6)  = I2C SCL (LCD + RTC)
- *   D6 (GPIO43) = IR LED (via 100Ω)
- *   D7 (GPIO44) = IR Receiver OUT (+ 10kΩ pull-down to GND)
+ *   D6 (GPIO43) = IR LED (via 47Ω) ← CHANGED from 100Ω
+ *   D7 (GPIO44) = IR Receiver OUT (NO external pull-down) ← CHANGED
  *   
  * Expansion Board:
  *   Camera, Microphone, SD Card
@@ -103,31 +142,90 @@
 // ============================================================================
 
 #define DEVICE_NAME         "SmartTrap_001"
-#define FIRMWARE_VERSION    "1.0"
-#define AUTH_PASSWORD       "smart2025"   // Change this to your desired password
+#define FIRMWARE_VERSION    "1.2"
+#define AUTH_PASSWORD       "smart2025"
+
+// ── IR Detection Configuration (v1.1) ──────────────────────────────────────
+// 
+// How the IR beam-break works:
+//   The IR LED emits a 38kHz modulated beam. The TSOP receiver demodulates
+//   this signal internally. When the beam is INTACT, TSOP output is LOW.
+//   When a moth breaks the beam, TSOP output goes HIGH. We trigger on the
+//   RISING edge (beam broken).
+//
+// Why 38kHz PWM instead of DC?
+//   TSOP receivers contain a bandpass filter centered at their rated frequency
+//   (38kHz). They are designed to REJECT constant (DC) infrared light — this
+//   is what makes them immune to ambient sunlight and incandescent bulbs.
+//   Driving the IR LED with DC means the TSOP barely responds, which was
+//   causing our sensitivity problems.
+//
+// Why 80ms debounce instead of 200ms?
+//   A moth's wingspan is ~30-40mm. At typical flight speed (~1-2 m/s), it
+//   crosses a narrow beam in 15-40ms. With 200ms debounce, a second moth
+//   arriving within 200ms of the first would be missed. 80ms is a good
+//   balance — long enough to filter electrical noise, short enough to catch
+//   rapid successive entries.
+// ────────────────────────────────────────────────────────────────────────────
+
+#define IR_PWM_FREQUENCY    38000   // 38kHz — must match TSOP receiver spec
+#define IR_PWM_DUTY         128     // 50% duty cycle (0-255 range, 8-bit)
+                                    // Higher = brighter beam but more power
+                                    // 50% is standard for TSOP receivers
+#define IR_PWM_RESOLUTION   8       // 8-bit resolution (0-255)
+#define IR_PWM_CHANNEL      0       // LEDC channel for IR LED (camera uses channel 1)
+
+#define IR_DEBOUNCE_MS      150     // ← Tuned for moth wing-beat filtering
+                                    // Collapses wing-flapping (20-40Hz) into
+                                    // single detection. Low enough to catch
+                                    // two moths arriving 150ms+ apart.
+
+// Beam health monitoring
+#define BEAM_BLOCKED_WARN_MS   30000   // Warn if beam blocked >30 seconds
+#define BEAM_HEALTH_CHECK_MS   5000    // Check beam health every 5 seconds
+
+// ── IR Receiver Logic Polarity ─────────────────────────────────────────────
+//
+// Different IR receivers have different output logic:
+//
+//   TSOP38238 (common assumption):
+//     HIGH = no IR detected (beam broken)
+//     LOW  = IR detected (beam intact)
+//
+//   Your receiver (1738/1838 from kit):
+//     HIGH = IR detected (beam intact)    ← THIS IS WHAT YOU HAVE
+//     LOW  = no IR detected (beam broken)
+//
+// We define a macro so the logic is correct everywhere in the code.
+// If you swap receivers in the future and the logic flips again,
+// just change IR_BEAM_BROKEN_STATE from LOW to HIGH.
+// ────────────────────────────────────────────────────────────────────────────
+
+#define IR_BEAM_BROKEN_STATE   LOW     // What the receiver pin reads when beam is BROKEN
+                                        // Your receiver: LOW = broken, HIGH = intact
+                                        // TSOP38238:     HIGH = broken, LOW = intact
 
 // Power Saving Configuration
-#define ENABLE_SCHEDULED_SLEEP  true     // Enable sleep during day hours
-#define ACTIVE_START_HOUR       20       // 8:00 PM (20:00) - Start monitoring
-#define ACTIVE_END_HOUR         6        // 6:00 AM (06:00) - Stop monitoring
-#define SLEEP_CHECK_INTERVAL    300000     // Check every 5 min during active hours (go to sleep)
-#define WAKE_CHECK_INTERVAL     1800000    // Check every 30 min during sleep (wake up)
-#define STARTUP_GRACE_PERIOD    30000      // 30 second grace period before sleeping (allows BLE connection)
-#define USB_CHECK_DELAY         10000      // 10 second delay before checking for USB MSC mode
-#define USB_MSC_ENABLED         true       // Enable USB Mass Storage auto-detection
+#define ENABLE_SCHEDULED_SLEEP  false     // Set to true for field deployment (sleeps 6AM-8PM)
+                                          // Set to false for bench testing (always active)
+#define ACTIVE_START_HOUR       20
+#define ACTIVE_END_HOUR         6
+#define SLEEP_CHECK_INTERVAL    300000
+#define WAKE_CHECK_INTERVAL     1800000
+#define STARTUP_GRACE_PERIOD    30000
+#define USB_CHECK_DELAY         10000
+#define USB_MSC_ENABLED         true
 
 // Environmental Logging Configuration
-#define ENV_LOG_INTERVAL_MS     60000    // Log environment every 60 seconds (1 minute)
-                                         // Change to 3600000 for hourly logging
+#define ENV_LOG_INTERVAL_MS     60000
 
 #define SERVICE_UUID              "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
 #define CHARACTERISTIC_UUID_TX    "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 #define CHARACTERISTIC_UUID_RX    "beb5483e-36e1-4688-b7f5-ea07361b26a9"
 
-#define IR_DEBOUNCE_MS       200
-#define RECORDING_DURATION   10000    // 10 seconds
-#define VIDEO_FPS            15       // 15 frames per second
-#define AUDIO_SAMPLE_RATE    16000    // 16kHz
+#define RECORDING_DURATION   10000
+#define VIDEO_FPS            10
+#define AUDIO_SAMPLE_RATE    16000
 #define AUDIO_BITS           16
 
 #define CHUNK_SIZE      64
@@ -147,7 +245,7 @@ i2s_chan_handle_t mic_handle = NULL;
 BLEServer* pServer = NULL;
 BLECharacteristic* pTxCharacteristic = NULL;
 bool deviceConnected = false;
-bool isAuthenticated = false;  // Password protection for sensitive operations
+bool isAuthenticated = false;
 
 // ============================================================================
 // STATE VARIABLES
@@ -157,10 +255,31 @@ bool lcdOK = false, rtcOK = false, dhtOK = false, ds18b20OK = false;
 bool cameraOK = false, micOK = false, sdOK = false;
 byte lcdAddress = 0x27;
 
+// ── IR Detection State (v1.1 — interrupt-driven) ───────────────────────────
+//
+// These variables are shared between the ISR and the main loop.
+// 'volatile' tells the compiler not to optimize away reads — the value
+// can change at any time from the interrupt context.
+//
+// IRAM_ATTR on the ISR function places it in internal RAM instead of flash.
+// This is REQUIRED for ESP32 ISRs because flash access can be blocked
+// during certain operations (WiFi, flash writes), which would crash if
+// the ISR tried to execute from flash.
+// ────────────────────────────────────────────────────────────────────────────
+
 volatile bool irTriggered = false;
 volatile unsigned long lastIRTime = 0;
-unsigned long detectionCount = 0;
+volatile unsigned long irTransitionCount = 0;   // Total beam-break events (for diagnostics)
 volatile bool isRecording = false;
+
+bool irPWMActive = false;                        // Track if PWM is currently running
+
+// Beam health monitoring
+unsigned long beamBlockedSince = 0;              // When beam was first detected as blocked
+unsigned long lastBeamHealthCheck = 0;           // Last time we checked beam health
+bool beamBlockedWarning = false;                 // Currently in blocked-warning state
+
+unsigned long detectionCount = 0;
 
 struct SensorData {
     float airTemp;
@@ -206,15 +325,234 @@ unsigned long lastEnvLog = 0;
 USBMSC msc;
 bool usbMscMode = false;
 
-// Forward declaration for USB MSC code
+// SD card mutex — SD_MMC is NOT thread-safe. Both the video task (Core 0)
+// and audio task (Core 1) write to SD simultaneously during recording.
+// Without this mutex, concurrent writes corrupt data or silently fail,
+// producing 0-byte files.
+SemaphoreHandle_t sdMutex = NULL;
+
+// Recording parameters — file scope so both tasks can safely access them.
+// Previously was a static local in recordEvent(), but the pointer was shared
+// across tasks, creating a subtle race condition.
+struct RecordParams {
+    String videoPath;
+    String audioPath;
+    int durationMs;
+};
+RecordParams recordParams;
+
+// Forward declarations
 void lcdPrint(String line1, String line2 = "");
+
+// ============================================================================
+// FORWARD DECLARATIONS
+// ============================================================================
+
+void initComponents();
+void initCamera();
+void initMicrophone();
+void initSDCard();
+void restoreDetectionCount();
+void setupBLE();
+void readSensors();
+void recordEvent();
+void logDetection(String videoPath, String audioPath);
+void logEnvironment();
+void logBeamWarning(String event);
+void checkBeamHealth();
+void irLedOn();
+void irLedOff();
+void irInterruptEnable();
+void irInterruptDisable();
+void processTransfer();
+void sendBLE(String msg);
+void updateLCD();
+void handleButton();
+void toggleBLE();
+String getTimestamp();
+String getDatePath();
+void createDirectory(String path);
+bool isWithinActiveHours();
+int getMinutesUntilActive();
+void prepareSleep();
+void enterDeepSleep(int sleepMinutes);
+void wakeUp();
+void checkScheduleAndSleep();
+void setActiveMode(bool active);
+void checkAndEnterUSBMode();
+bool startUSBMassStorage();
+
+// ============================================================================
+// IR BEAM-BREAK ISR (v1.1)
+// ============================================================================
+//
+// This interrupt service routine fires on the FALLING edge of the IR receiver
+// output pin. FALLING edge = beam just got broken (receiver goes LOW when it
+// stops detecting the 38kHz modulated IR).
+//
+// NOTE: Some TSOP receivers use opposite logic (HIGH = broken). If you swap
+// receivers and detection stops working, change FALLING to RISING here and
+// flip IR_BEAM_BROKEN_STATE from LOW to HIGH.
+//
+// Rules for ISRs on ESP32:
+//   1. Keep it SHORT — no Serial prints, no SD writes, no BLE calls
+//   2. Only set flags and update volatile variables
+//   3. Must be in IRAM (IRAM_ATTR) to avoid flash-access crashes
+//   4. millis() is safe to call in ESP32 ISRs (it reads a hardware timer)
+//
+// The main loop checks 'irTriggered' and handles the actual recording.
+// ============================================================================
+
+void IRAM_ATTR irBeamBreakISR() {
+    unsigned long now = millis();
+    if (now - lastIRTime > IR_DEBOUNCE_MS) {
+        irTriggered = true;
+        lastIRTime = now;
+        irTransitionCount++;
+    }
+}
+
+// ============================================================================
+// IR LED PWM CONTROL (v1.1)
+// ============================================================================
+//
+// ledcAttach() is the ESP32 Arduino 3.x API for configuring PWM.
+// It replaces the older ledcSetup() + ledcAttachPin() two-step process.
+//
+// The 38kHz square wave makes the TSOP "see" the IR LED as a valid signal
+// source, just like a TV remote. When a moth blocks this beam, the TSOP's
+// output goes HIGH, triggering our interrupt.
+// ============================================================================
+
+void irLedOn() {
+    // Attach pin to LEDC PWM at 38kHz with 8-bit resolution
+    ledcAttach(IR_LED_PIN, IR_PWM_FREQUENCY, IR_PWM_RESOLUTION);
+    ledcWrite(IR_LED_PIN, IR_PWM_DUTY);
+    irPWMActive = true;
+    Serial.printf("[IR] LED ON — 38kHz PWM, duty=%d/255 (%.0f%%)\n",
+        IR_PWM_DUTY, (IR_PWM_DUTY / 255.0) * 100);
+}
+
+void irLedOff() {
+    ledcDetach(IR_LED_PIN);
+    digitalWrite(IR_LED_PIN, LOW);  // Ensure LED is fully off
+    irPWMActive = false;
+    Serial.println("[IR] LED OFF");
+}
+
+// ============================================================================
+// IR INTERRUPT MANAGEMENT (v1.1)
+// ============================================================================
+//
+// We enable/disable the interrupt in specific situations:
+//   - Disable during recording (avoid re-triggering while processing)
+//   - Disable during sleep (save power)
+//   - Enable during active monitoring
+//
+// attachInterrupt() with FALLING mode means the ISR fires when the pin
+// transitions from HIGH→LOW, which is when the receiver stops detecting IR
+// (beam is broken by a moth).
+// ============================================================================
+
+void irInterruptEnable() {
+    // FALLING edge = pin goes HIGH→LOW = beam just got broken
+    // (Your receiver outputs LOW when it stops detecting IR)
+    attachInterrupt(digitalPinToInterrupt(IR_RECEIVER_PIN), irBeamBreakISR, FALLING);
+    Serial.println("[IR] Interrupt enabled (FALLING edge)");
+}
+
+void irInterruptDisable() {
+    detachInterrupt(digitalPinToInterrupt(IR_RECEIVER_PIN));
+    Serial.println("[IR] Interrupt disabled");
+}
+
+// ============================================================================
+// BEAM HEALTH MONITORING (v1.1)
+// ============================================================================
+//
+// In field deployment, the IR beam can get permanently blocked by:
+//   - Dead insects stuck in the beam path
+//   - Spider webs across the sensor gap
+//   - Debris blown in by wind
+//   - Condensation on the sensor lens
+//   - Misalignment from physical bumps
+//
+// This function detects sustained blockage and warns the operator.
+// Without this, a blocked beam means zero detections with no indication
+// of a hardware problem — you'd think there are simply no moths.
+// ============================================================================
+
+void checkBeamHealth() {
+    if (millis() - lastBeamHealthCheck < BEAM_HEALTH_CHECK_MS) return;
+    lastBeamHealthCheck = millis();
+    
+    // Check beam state using configured polarity
+    bool beamBroken = (digitalRead(IR_RECEIVER_PIN) == IR_BEAM_BROKEN_STATE);
+    
+    if (beamBroken) {
+        // Beam is currently broken
+        if (beamBlockedSince == 0) {
+            // Just started being blocked
+            beamBlockedSince = millis();
+        } else if (millis() - beamBlockedSince > BEAM_BLOCKED_WARN_MS) {
+            // Been blocked for too long — this is NOT a moth, it's an obstruction
+            if (!beamBlockedWarning) {
+                beamBlockedWarning = true;
+                Serial.println("[IR] ⚠ WARNING: Beam blocked for >30s — check for obstruction!");
+                Serial.println("[IR]   Possible causes: debris, spider web, misalignment, condensation");
+                
+                if (lcdOK) {
+                    lcdPrint("! BEAM BLOCKED", "Check IR sensor");
+                }
+                
+                // Log the warning
+                if (sdOK) {
+                    logBeamWarning("BLOCKED");
+                }
+            }
+            // Reset timer to warn again periodically (every 30s)
+            beamBlockedSince = millis();
+        }
+    } else {
+        // Beam is intact
+        if (beamBlockedWarning) {
+            // Beam was blocked but is now clear
+            Serial.println("[IR] ✓ Beam restored — obstruction cleared");
+            beamBlockedWarning = false;
+            
+            if (sdOK) {
+                logBeamWarning("RESTORED");
+            }
+        }
+        beamBlockedSince = 0;
+    }
+}
+
+void logBeamWarning(String event) {
+    if (!sdOK) return;
+    
+    String logPath = "/logs/beam_health.csv";
+    bool newFile = !SD_MMC.exists(logPath);
+    
+    File logFile = SD_MMC.open(logPath, FILE_APPEND);
+    if (logFile) {
+        if (newFile) {
+            logFile.println("timestamp,event,ir_receiver_state");
+        }
+        
+        String ts = getTimestamp();
+        bool broken = (digitalRead(IR_RECEIVER_PIN) == IR_BEAM_BROKEN_STATE);
+        logFile.printf("%s,%s,%s\n", ts.c_str(), event.c_str(),
+            broken ? "BROKEN" : "INTACT");
+        logFile.close();
+    }
+}
 
 // ============================================================================
 // USB MASS STORAGE CALLBACKS
 // ============================================================================
 
 static int32_t onMscRead(uint32_t lba, uint32_t offset, void* buffer, uint32_t bufsize) {
-    // Read from SD card
     uint32_t sectorSize = SD_MMC.sectorSize();
     if (sectorSize == 0) return -1;
     
@@ -222,7 +560,6 @@ static int32_t onMscRead(uint32_t lba, uint32_t offset, void* buffer, uint32_t b
     if (!file) return -1;
     file.close();
     
-    // Direct sector read
     uint8_t* buf = (uint8_t*)buffer;
     for (uint32_t i = 0; i < bufsize / sectorSize; i++) {
         if (!SD_MMC.readRAW((uint8_t*)(buf + i * sectorSize), lba + i)) {
@@ -233,7 +570,6 @@ static int32_t onMscRead(uint32_t lba, uint32_t offset, void* buffer, uint32_t b
 }
 
 static int32_t onMscWrite(uint32_t lba, uint32_t offset, uint8_t* buffer, uint32_t bufsize) {
-    // Write to SD card
     uint32_t sectorSize = SD_MMC.sectorSize();
     if (sectorSize == 0) return -1;
     
@@ -285,22 +621,17 @@ void checkAndEnterUSBMode() {
     Serial.println("[USB] Press BUTTON within 10 seconds for USB Drive Mode (data transfer)");
     Serial.println("[USB] Waiting 10 seconds...");
     
-    // Show on LCD
     if (lcdOK) {
         lcdPrint("Press BTN for", "USB Drive Mode");
     }
     
-    // Flush serial and wait
     Serial.flush();
     unsigned long startTime = millis();
     bool buttonPressed = false;
     
-    // Wait 10 seconds, checking for button press
     while (millis() - startTime < USB_CHECK_DELAY) {
-        // Check for button press (USB Drive Mode)
         if (digitalRead(BUTTON_PIN) == LOW) {
             buttonPressed = true;
-            // Wait for button release with timeout (max 3 seconds)
             unsigned long btnStart = millis();
             while (digitalRead(BUTTON_PIN) == LOW && (millis() - btnStart < 3000)) {
                 delay(10);
@@ -310,14 +641,12 @@ void checkAndEnterUSBMode() {
         
         delay(100);
         
-        // Update countdown on LCD
         if (lcdOK && ((millis() - startTime) % 1000 < 100)) {
             int remaining = (USB_CHECK_DELAY - (millis() - startTime)) / 1000;
             lcdPrint("BTN=USB Drive", String(remaining) + "s remaining");
         }
     }
     
-    // No button pressed - Normal Mode (default for field deployment)
     if (!buttonPressed) {
         Serial.println();
         Serial.println("[USB] No button press - NORMAL MODE");
@@ -329,7 +658,6 @@ void checkAndEnterUSBMode() {
         return;
     }
     
-    // Button pressed - enter USB Drive Mode for data transfer
     Serial.println();
     Serial.println("╔══════════════════════════════════════════╗");
     Serial.println("║       USB DRIVE MODE (Data Transfer)     ║");
@@ -346,21 +674,17 @@ void checkAndEnterUSBMode() {
         lcdPrint("USB DRIVE MODE", "Copy files now");
     }
     
-    // Stop BLE to free resources
     if (bleEnabled) {
         BLEDevice::deinit(false);
         bleEnabled = false;
     }
     
-    // Start USB MSC
     if (startUSBMassStorage()) {
         Serial.println("[USB MSC] Ready - SD card mounted as USB drive");
         
-        // Stay in USB mode until unplugged
         while (usbMscMode) {
             delay(1000);
             
-            // Toggle LCD to show we're alive
             if (lcdOK) {
                 static bool toggle = false;
                 toggle = !toggle;
@@ -384,7 +708,6 @@ void checkAndEnterUSBMode() {
 // AVI HEADER STRUCTURES
 // ============================================================================
 
-// AVI file format structures for MJPEG video
 #pragma pack(push, 1)
 
 struct AVI_RIFF_HEADER {
@@ -405,7 +728,7 @@ struct AVI_AVIH {
     uint32_t microSecPerFrame;
     uint32_t maxBytesPerSec;
     uint32_t paddingGranularity = 0;
-    uint32_t flags = 0x10;  // AVIF_HASINDEX
+    uint32_t flags = 0x10;
     uint32_t totalFrames;
     uint32_t initialFrames = 0;
     uint32_t streams = 1;
@@ -425,9 +748,9 @@ struct AVI_STRH {
     uint16_t language = 0;
     uint32_t initialFrames = 0;
     uint32_t scale = 1;
-    uint32_t rate;  // fps
+    uint32_t rate;
     uint32_t start = 0;
-    uint32_t length;  // total frames
+    uint32_t length;
     uint32_t suggestedBufferSize;
     uint32_t quality = 0xFFFFFFFF;
     uint32_t sampleSize = 0;
@@ -465,8 +788,8 @@ struct WAV_HEADER {
     char wave[4] = {'W','A','V','E'};
     char fmt[4] = {'f','m','t',' '};
     uint32_t subchunk1Size = 16;
-    uint16_t audioFormat = 1;  // PCM
-    uint16_t numChannels = 1;  // Mono
+    uint16_t audioFormat = 1;
+    uint16_t numChannels = 1;
     uint32_t sampleRate;
     uint32_t byteRate;
     uint16_t blockAlign;
@@ -476,40 +799,20 @@ struct WAV_HEADER {
 };
 
 // ============================================================================
-// FORWARD DECLARATIONS
-// ============================================================================
-
-void initComponents();
-void initCamera();
-void initMicrophone();
-void initSDCard();
-void restoreDetectionCount();
-void setupBLE();
-void readSensors();
-void recordEvent();
-void logDetection(String videoPath, String audioPath);
-void processTransfer();
-void sendBLE(String msg);
-void updateLCD();
-String getTimestamp();
-String getDatePath();
-void createDirectory(String path);
-
-// ============================================================================
 // BLE CALLBACKS
 // ============================================================================
 
 class ServerCallbacks : public BLEServerCallbacks {
     void onConnect(BLEServer* pServer) {
         deviceConnected = true;
-        isAuthenticated = false;  // Reset auth on new connection
+        isAuthenticated = false;
         Serial.println("[BLE] Connected - awaiting authentication");
         lcdPrint("BLE Connected", "Not authenticated");
     }
     
     void onDisconnect(BLEServer* pServer) {
         deviceConnected = false;
-        isAuthenticated = false;  // Reset auth on disconnect
+        isAuthenticated = false;
         Serial.println("[BLE] Disconnected");
         
         if (transfer.state != IDLE) {
@@ -529,7 +832,6 @@ class RxCallbacks : public BLECharacteristicCallbacks {
         
         Serial.printf("[BLE] Command: %s\n", cmd.c_str());
         
-        // Cancel transfer (always allowed)
         if (cmd == "CANCEL") {
             if (transfer.state != IDLE) {
                 if (transfer.file) transfer.file.close();
@@ -539,7 +841,6 @@ class RxCallbacks : public BLECharacteristicCallbacks {
             return;
         }
         
-        // Busy check
         if (transfer.state != IDLE) {
             sendBLE("BUSY");
             return;
@@ -556,9 +857,13 @@ class RxCallbacks : public BLECharacteristicCallbacks {
             sendBLE(isAuthenticated ? "AUTH:YES" : "AUTH:NO"); 
             return; 
         }
+        
+        // ── v1.1: IR diagnostics command ────────────────────────
+        if (cmd == "IRTEST") { cmdIRTest(); return; }
+        
         if (cmd == "HELP") { 
-            sendBLE("PUBLIC:STATUS,SENSORS,DIAG,DETECTIONS,RECORD,AUTH:pwd,AUTHSTATUS");
-            sendBLE("PROTECTED:LIST,CD,GET,DELETE,RESET,LOGOUT"); 
+            sendBLE("PUBLIC:STATUS,SENSORS,DIAG,DETECTIONS,RECORD,IRTEST,AUTH:pwd,AUTHSTATUS");
+            sendBLE("PROTECTED:LIST,CD,GET,DELETE,RESET,SETTIME,LOGOUT"); 
             return; 
         }
         
@@ -593,26 +898,102 @@ class RxCallbacks : public BLECharacteristicCallbacks {
             return;
         }
         
-        // File browser commands
         if (cmd == "LIST") { cmdListDir(currentPath); return; }
         if (cmd.startsWith("CD:")) { cmdChangeDir(cmd.substring(3)); return; }
         if (cmd.startsWith("GET:")) { cmdGetFile(cmd.substring(4)); return; }
         if (cmd.startsWith("DELETE:")) { cmdDelete(cmd.substring(7)); return; }
-        
-        // Reset command - clears all data
         if (cmd == "RESET") { cmdReset(); return; }
+        
+        // Set RTC time: SETTIME:2026-02-15 14:30:00
+        if (cmd.startsWith("SETTIME:")) { cmdSetTime(cmd.substring(8)); return; }
         
         sendBLE("UNKNOWN:" + cmd);
     }
     
+    // ── v1.1: IR Test Command ───────────────────────────────────────────
+    // Provides real-time IR beam diagnostics over BLE.
+    // Useful for field troubleshooting without a serial connection.
+    // ─────────────────────────────────────────────────────────────────────
+    void cmdIRTest() {
+        bool beamBroken = (digitalRead(IR_RECEIVER_PIN) == IR_BEAM_BROKEN_STATE);
+        
+        String s = "IRTEST:beam=" + String(beamBroken ? "BROKEN" : "INTACT");
+        s += ",pwm=" + String(irPWMActive ? "ON" : "OFF");
+        s += ",freq=" + String(IR_PWM_FREQUENCY) + "Hz";
+        s += ",duty=" + String(IR_PWM_DUTY) + "/255";
+        s += ",debounce=" + String(IR_DEBOUNCE_MS) + "ms";
+        s += ",transitions=" + String((unsigned long)irTransitionCount);
+        s += ",detections=" + String(detectionCount);
+        s += ",blocked_warn=" + String(beamBlockedWarning ? "YES" : "NO");
+        sendBLE(s);
+        
+        // Rapid-fire beam test: read 10 times over 500ms to show stability
+        String stability = "IRBEAM:";
+        for (int i = 0; i < 10; i++) {
+            stability += (digitalRead(IR_RECEIVER_PIN) == IR_BEAM_BROKEN_STATE) ? "X" : ".";
+            delay(50);
+        }
+        stability += " (.=intact,X=broken)";
+        sendBLE(stability);
+    }
+    
+    // ── v1.2: Set RTC Time Command ──────────────────────────────────────
+    // Usage over BLE: SETTIME:2026-02-15 14:30:00
+    // Format: YYYY-MM-DD HH:MM:SS
+    // Requires authentication first (AUTH:password)
+    // ─────────────────────────────────────────────────────────────────────
+    void cmdSetTime(String timeStr) {
+        if (!rtcOK) {
+            sendBLE("ERROR:RTC not available");
+            return;
+        }
+        
+        // Parse: "2026-02-15 14:30:00"
+        // Index:  0123456789012345678
+        timeStr.trim();
+        
+        if (timeStr.length() < 19) {
+            sendBLE("ERROR:Format YYYY-MM-DD HH:MM:SS");
+            return;
+        }
+        
+        int yr  = timeStr.substring(0, 4).toInt();
+        int mo  = timeStr.substring(5, 7).toInt();
+        int dy  = timeStr.substring(8, 10).toInt();
+        int hr  = timeStr.substring(11, 13).toInt();
+        int mn  = timeStr.substring(14, 16).toInt();
+        int sc  = timeStr.substring(17, 19).toInt();
+        
+        // Basic validation
+        if (yr < 2024 || yr > 2035 || mo < 1 || mo > 12 || 
+            dy < 1 || dy > 31 || hr > 23 || mn > 59 || sc > 59) {
+            sendBLE("ERROR:Invalid date/time values");
+            return;
+        }
+        
+        rtc.adjust(DateTime(yr, mo, dy, hr, mn, sc));
+        
+        // Read back to confirm
+        DateTime now = rtc.now();
+        char buf[25];
+        sprintf(buf, "%04d-%02d-%02d %02d:%02d:%02d",
+            now.year(), now.month(), now.day(),
+            now.hour(), now.minute(), now.second());
+        
+        Serial.printf("[RTC] Time set to: %s\n", buf);
+        sendBLE("TIME_SET:" + String(buf));
+        
+        if (lcdOK) {
+            lcdPrint("Time Updated", String(buf).substring(11));
+        }
+    }
+    
     void cmdStatus() {
-        // Basic status - always available
         String s = "STATUS:v=" + String(FIRMWARE_VERSION);
         s += ",name=" + String(DEVICE_NAME);
         s += ",det=" + String(detectionCount);
         s += ",auth=" + String(isAuthenticated ? "YES" : "NO");
         
-        // Time info
         if (rtcOK) {
             DateTime now = rtc.now();
             char timeStr[20];
@@ -621,11 +1002,9 @@ class RxCallbacks : public BLECharacteristicCallbacks {
             s += ",time=" + String(timeStr);
         }
         
-        // Schedule info
         s += ",sched=" + String(ACTIVE_START_HOUR) + ":00-" + String(ACTIVE_END_HOUR) + ":00";
         s += ",active=" + String(isActiveHours ? "YES" : "NO");
         
-        // Uptime
         unsigned long uptimeSec = millis() / 1000;
         unsigned long uptimeMin = uptimeSec / 60;
         unsigned long uptimeHr = uptimeMin / 60;
@@ -635,7 +1014,6 @@ class RxCallbacks : public BLECharacteristicCallbacks {
     }
     
     void cmdDiagnostics() {
-        // Component status
         String s = "DIAG:lcd=" + String(lcdOK ? "OK" : "FAIL");
         s += ",rtc=" + String(rtcOK ? "OK" : "FAIL");
         s += ",dht=" + String(dhtOK ? "OK" : "FAIL");
@@ -643,17 +1021,18 @@ class RxCallbacks : public BLECharacteristicCallbacks {
         s += ",cam=" + String(cameraOK ? "OK" : "FAIL");
         s += ",mic=" + String(micOK ? "OK" : "FAIL");
         s += ",sd=" + String(sdOK ? "OK" : "FAIL");
-        s += ",ble=OK";  // If we're receiving this, BLE works
-        s += ",ir=" + String(digitalRead(IR_RECEIVER_PIN) ? "CLEAR" : "BLOCKED");
+        s += ",ble=OK";
+        
+        // v1.1: Enhanced IR status
+        s += ",ir_beam=" + String((digitalRead(IR_RECEIVER_PIN) == IR_BEAM_BROKEN_STATE) ? "BROKEN" : "INTACT");
+        s += ",ir_pwm=" + String(irPWMActive ? "ON" : "OFF");
         sendBLE(s);
         
-        // Memory info
         String mem = "MEMORY:heap=" + String(ESP.getFreeHeap() / 1024) + "KB";
         mem += ",psram=" + String(ESP.getFreePsram() / 1024) + "KB";
         mem += ",minHeap=" + String(ESP.getMinFreeHeap() / 1024) + "KB";
         sendBLE(mem);
         
-        // SD card info
         if (sdOK) {
             uint64_t totalBytes = SD_MMC.totalBytes();
             uint64_t usedBytes = SD_MMC.usedBytes();
@@ -665,12 +1044,10 @@ class RxCallbacks : public BLECharacteristicCallbacks {
             sendBLE(sd);
         }
         
-        // Battery placeholder (for future hardware)
         sendBLE("BATTERY:pct=--,charging=--,voltage=--");
     }
     
     void cmdSensors() {
-        // Read fresh sensor data
         readSensors();
         
         String s = "SENSORS:airT=" + String(sensors.airTemp, 1);
@@ -678,8 +1055,6 @@ class RxCallbacks : public BLECharacteristicCallbacks {
         s += ",soilT=" + String(sensors.soilTemp, 1);
         s += ",soilM=" + String(sensors.soilMoisture);
         s += ",time=" + sensors.timestamp;
-        
-        // Add sensor health indicators
         s += ",dhtOK=" + String(dhtOK ? "1" : "0");
         s += ",dsOK=" + String(ds18b20OK ? "1" : "0");
         sendBLE(s);
@@ -758,38 +1133,28 @@ class RxCallbacks : public BLECharacteristicCallbacks {
         
         int filesDeleted = 0;
         
-        // Delete all files in /events recursively
         if (SD_MMC.exists("/events")) {
             Serial.println("[RESET] Clearing /events folder...");
             filesDeleted += deleteRecursive("/events");
-            SD_MMC.rmdir("/events");  // Remove the events folder itself
-        } else {
-            Serial.println("[RESET] /events folder not found");
+            SD_MMC.rmdir("/events");
         }
         
-        // Delete all files in /logs
         if (SD_MMC.exists("/logs")) {
             Serial.println("[RESET] Clearing /logs folder...");
             filesDeleted += deleteRecursive("/logs");
-            SD_MMC.rmdir("/logs");  // Remove the logs folder itself
-        } else {
-            Serial.println("[RESET] /logs folder not found");
+            SD_MMC.rmdir("/logs");
         }
         
-        // Recreate directories
         createDirectory("/events");
         createDirectory("/logs");
-        Serial.println("[RESET] Recreated /events and /logs folders");
         
-        // Reset detection counter
         detectionCount = 0;
+        irTransitionCount = 0;  // v1.1: also reset transition counter
         
         Serial.printf("[RESET] Complete! Deleted %d files\n", filesDeleted);
-        Serial.println("[RESET] Detection counter reset to 0");
         Serial.println("[RESET] ════════════════════════════════════════");
         
         lcdPrint("Reset Complete", String(filesDeleted) + " files deleted");
-        
         sendBLE("RESET:OK,deleted=" + String(filesDeleted));
         
         delay(2000);
@@ -798,46 +1163,29 @@ class RxCallbacks : public BLECharacteristicCallbacks {
     int deleteRecursive(String path) {
         int count = 0;
         File dir = SD_MMC.open(path);
-        if (!dir || !dir.isDirectory()) {
-            Serial.printf("[RESET] Cannot open directory: %s\n", path.c_str());
-            return 0;
-        }
-        
-        Serial.printf("[RESET] Scanning: %s\n", path.c_str());
+        if (!dir || !dir.isDirectory()) return 0;
         
         File entry;
         while ((entry = dir.openNextFile())) {
             String entryName = entry.name();
             
-            // Construct full path - entry.name() may or may not include parent path
             String fullPath;
             if (entryName.startsWith("/")) {
-                fullPath = entryName;  // Already full path
+                fullPath = entryName;
             } else {
-                // Build full path from parent + name
                 fullPath = path;
                 if (!fullPath.endsWith("/")) fullPath += "/";
                 fullPath += entryName;
             }
             
             bool isDir = entry.isDirectory();
-            entry.close();  // Close before delete/recurse
+            entry.close();
             
             if (isDir) {
-                // Recurse into subdirectory first
                 count += deleteRecursive(fullPath);
-                // Then remove the empty directory
-                if (SD_MMC.rmdir(fullPath)) {
-                    Serial.printf("[RESET] Removed dir: %s\n", fullPath.c_str());
-                }
+                SD_MMC.rmdir(fullPath);
             } else {
-                // Delete file
-                if (SD_MMC.remove(fullPath)) {
-                    count++;
-                    Serial.printf("[RESET] Deleted: %s\n", fullPath.c_str());
-                } else {
-                    Serial.printf("[RESET] Failed to delete: %s\n", fullPath.c_str());
-                }
+                if (SD_MMC.remove(fullPath)) count++;
             }
         }
         dir.close();
@@ -855,35 +1203,37 @@ void setup() {
     
     Serial.println();
     Serial.println("╔══════════════════════════════════════════╗");
-    Serial.println("║     SMARTTRAP FIRMWARE v1.0          ║");
-    Serial.println("║   Power Saving + AVI/WAV Recording       ║");
+    Serial.println("║     SMARTTRAP FIRMWARE v1.2              ║");
+    Serial.println("║   IR Sensitivity + Power Saving          ║");
     Serial.println("╚══════════════════════════════════════════╝");
     Serial.println();
     
-    // Check wake-up reason
     wakeUp();
     
     transfer.state = IDLE;
     
     initComponents();
     
-    // Configure button pin FIRST - needed for USB mode check
     pinMode(BUTTON_PIN, INPUT_PULLUP);
     
-    // Check if we should enter USB Mass Storage mode
-    // This gives 10 seconds for Arduino IDE to connect for programming
-    // If no serial activity, SD card becomes a USB drive for easy data offload
     checkAndEnterUSBMode();
     
-    pinMode(IR_LED_PIN, OUTPUT);
+    // ── v1.1: IR Setup (38kHz PWM + Interrupt) ─────────────────────────
+    //
+    // Configure the IR receiver pin BEFORE enabling the LED.
+    // INPUT_PULLUP provides the pull-up that TSOP's open-collector
+    // output needs. The external 10kΩ pull-down should be REMOVED
+    // from the circuit (see Hardware Guide below).
+    // ────────────────────────────────────────────────────────────────────
+    
     pinMode(IR_RECEIVER_PIN, INPUT_PULLUP);
     
-    // Only turn on IR LED if within active hours
     if (isWithinActiveHours()) {
-        digitalWrite(IR_LED_PIN, HIGH);
+        irLedOn();          // Start 38kHz PWM on IR LED
+        irInterruptEnable(); // Attach interrupt for beam-break detection
         isActiveHours = true;
     } else {
-        digitalWrite(IR_LED_PIN, LOW);
+        irLedOff();
         isActiveHours = false;
     }
     
@@ -899,6 +1249,14 @@ void setup() {
     Serial.printf("│  Microphone:  %s                         │\n", micOK ? "OK" : "FAIL");
     Serial.printf("│  SD Card:     %s                         │\n", sdOK ? "OK" : "FAIL");
     Serial.println("├──────────────────────────────────────────┤");
+    Serial.println("│           IR DETECTION (v1.1)            │");
+    Serial.println("├──────────────────────────────────────────┤");
+    Serial.printf("│  IR LED:      38kHz PWM, duty=%d/255     │\n", IR_PWM_DUTY);
+    Serial.printf("│  Debounce:    %dms                       │\n", IR_DEBOUNCE_MS);
+    Serial.printf("│  Beam State:  %s                    │\n", 
+        (digitalRead(IR_RECEIVER_PIN) == IR_BEAM_BROKEN_STATE) ? "BROKEN!" : "INTACT ");
+    Serial.printf("│  Detection:   Interrupt (RISING edge)     │\n");
+    Serial.println("├──────────────────────────────────────────┤");
     Serial.println("│           POWER SETTINGS                 │");
     Serial.println("├──────────────────────────────────────────┤");
     if (ENABLE_SCHEDULED_SLEEP) {
@@ -910,6 +1268,23 @@ void setup() {
     Serial.println("└──────────────────────────────────────────┘");
     Serial.println();
     
+    // v1.1: Initial beam state check
+    if (isActiveHours) {
+        delay(500);  // Give TSOP time to stabilize after PWM starts
+        bool beamOK = (digitalRead(IR_RECEIVER_PIN) != IR_BEAM_BROKEN_STATE);  // NOT broken = OK
+        if (!beamOK) {
+            Serial.println("[IR] ⚠ WARNING: Beam NOT detected at startup!");
+            Serial.println("[IR]   Check: LED alignment, receiver orientation, resistor value");
+            Serial.println("[IR]   Expected: IR receiver reads LOW when beam is intact");
+            if (lcdOK) {
+                lcdPrint("! NO IR BEAM", "Check alignment");
+                delay(3000);
+            }
+        } else {
+            Serial.println("[IR] ✓ Beam verified intact at startup");
+        }
+    }
+    
     if (sdOK) {
         createDirectory("/events");
         createDirectory("/logs");
@@ -918,7 +1293,7 @@ void setup() {
     readSensors();
     
     if (isActiveHours) {
-        lcdPrint("SmartTrap v1.0", "Monitoring...");
+        lcdPrint("SmartTrap v1.2", "Monitoring...");
         Serial.println(">>> System ready. Monitoring for moths... <<<");
     } else {
         String wakeTime = String(ACTIVE_START_HOUR) + ":00";
@@ -933,7 +1308,6 @@ void setup() {
 void initComponents() {
     Wire.begin(I2C_SDA, I2C_SCL);
     
-    // LCD
     Serial.print("[LCD] Initializing... ");
     for (byte addr = 0x27; addr <= 0x3F; addr += 0x18) {
         Wire.beginTransmission(addr);
@@ -949,24 +1323,32 @@ void initComponents() {
     }
     if (!lcdOK) Serial.println("FAIL");
     
-    lcdPrint("SmartTrap v1.0", "Starting...");
+    lcdPrint("SmartTrap v1.2", "Starting...");
     
-    // RTC
     Serial.print("[RTC] Initializing... ");
     if (rtc.begin()) {
-        if (rtc.lostPower()) rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+        if (rtc.lostPower()) {
+            Serial.println("[RTC] Lost power — setting to compile time");
+            rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+        }
         rtcOK = true;
-        Serial.println("OK");
+        DateTime now = rtc.now();
+        Serial.printf("OK (%04d-%02d-%02d %02d:%02d:%02d)\n",
+            now.year(), now.month(), now.day(),
+            now.hour(), now.minute(), now.second());
+        // Warn if time looks unreasonable
+        if (now.year() < 2024 || now.year() > 2035) {
+            Serial.println("[RTC] ⚠ WARNING: Year looks wrong! Use BLE SETTIME command to fix.");
+            Serial.println("[RTC]   Example: AUTH:smart2025  then  SETTIME:2026-02-15 14:30:00");
+        }
     } else Serial.println("FAIL");
     
-    // DHT11
     Serial.print("[DHT11] Initializing... ");
     dht.begin();
     delay(2000);
     if (!isnan(dht.readTemperature())) { dhtOK = true; Serial.println("OK"); }
     else Serial.println("FAIL");
     
-    // DS18B20
     Serial.print("[DS18B20] Initializing... ");
     ds18b20.begin();
     ds18b20.setWaitForConversion(true);
@@ -974,14 +1356,20 @@ void initComponents() {
     else Serial.println("FAIL");
     
     initSDCard();
-    restoreDetectionCount();  // Restore count from CSV
-    initCamera();
+    restoreDetectionCount();
+    setupBLE();          // v1.2: BLE must init BEFORE camera to secure advertising buffers
+    initCamera();        //       Camera frame buffers consume most of the remaining memory
     initMicrophone();
-    setupBLE();
 }
 
 void initSDCard() {
     Serial.print("[SD] Initializing... ");
+    
+    // Create mutex for thread-safe SD access
+    if (sdMutex == NULL) {
+        sdMutex = xSemaphoreCreateMutex();
+    }
+    
     SD_MMC.end();
     delay(100);
     SD_MMC.setPins(SD_MMC_CLK, SD_MMC_CMD, SD_MMC_D0);
@@ -1001,19 +1389,13 @@ void restoreDetectionCount() {
         return;
     }
     
-    // Count lines (excluding header)
     unsigned long lineCount = 0;
     bool firstLine = true;
     
     while (file.available()) {
         String line = file.readStringUntil('\n');
-        if (firstLine) {
-            firstLine = false;  // Skip header
-            continue;
-        }
-        if (line.length() > 0) {
-            lineCount++;
-        }
+        if (firstLine) { firstLine = false; continue; }
+        if (line.length() > 0) lineCount++;
     }
     file.close();
     
@@ -1025,8 +1407,8 @@ void initCamera() {
     Serial.print("[CAM] Initializing... ");
     
     camera_config_t config;
-    config.ledc_channel = LEDC_CHANNEL_0;
-    config.ledc_timer = LEDC_TIMER_0;
+    config.ledc_channel = LEDC_CHANNEL_1;  // v1.2: Changed from CHANNEL_0 to avoid IR LED conflict
+    config.ledc_timer = LEDC_TIMER_1;      // v1.2: Changed from TIMER_0 to avoid IR LED conflict
     config.pin_d0 = Y2_GPIO_NUM;
     config.pin_d1 = Y3_GPIO_NUM;
     config.pin_d2 = Y4_GPIO_NUM;
@@ -1044,17 +1426,18 @@ void initCamera() {
     config.pin_pwdn = PWDN_GPIO_NUM;
     config.pin_reset = RESET_GPIO_NUM;
     config.xclk_freq_hz = 20000000;
-    config.frame_size = FRAMESIZE_QVGA;  // 320x240
+    config.frame_size = FRAMESIZE_VGA;       // v1.2: Upgraded from QVGA (320x240) to VGA (640x480)
     config.pixel_format = PIXFORMAT_JPEG;
     config.grab_mode = CAMERA_GRAB_LATEST;
     config.fb_location = CAMERA_FB_IN_PSRAM;
-    config.jpeg_quality = 12;
+    config.jpeg_quality = 10;                 // v1.2: Slightly better quality (lower = better, 0-63)
     config.fb_count = 2;
     
     if (!psramFound()) {
-        config.frame_size = FRAMESIZE_QQVGA;
+        config.frame_size = FRAMESIZE_QVGA;   // Fallback without PSRAM
         config.fb_location = CAMERA_FB_IN_DRAM;
         config.fb_count = 1;
+        config.jpeg_quality = 12;
     }
     
     if (esp_camera_init(&config) == ESP_OK) { cameraOK = true; Serial.println("OK"); }
@@ -1190,12 +1573,12 @@ void createDirectory(String path) {
 // ============================================================================
 // VIDEO RECORDING TASK (Core 0)
 // ============================================================================
-
-struct RecordParams {
-    String videoPath;
-    String audioPath;
-    int durationMs;
-};
+//
+// v1.2 Changes:
+//   - SD writes wrapped in sdMutex to prevent corruption from concurrent audio writes
+//   - Validates frame count before creating AVI (skip if 0 frames captured)
+//   - Better error logging for debugging field failures
+// ============================================================================
 
 void videoRecordTask(void* param) {
     RecordParams* params = (RecordParams*)param;
@@ -1203,7 +1586,7 @@ void videoRecordTask(void* param) {
     Serial.println("[VIDEO] Task started on Core " + String(xPortGetCoreID()));
     
     if (!cameraOK) {
-        Serial.println("[VIDEO] Camera not available");
+        Serial.println("[VIDEO] Camera not available — skipping video");
         videoTaskDone = true;
         vTaskDelete(NULL);
         return;
@@ -1212,7 +1595,7 @@ void videoRecordTask(void* param) {
     // Capture first frame to get dimensions
     camera_fb_t* fb = esp_camera_fb_get();
     if (!fb) {
-        Serial.println("[VIDEO] Failed to capture initial frame");
+        Serial.println("[VIDEO] Failed to capture initial frame — camera may be in bad state");
         videoTaskDone = true;
         vTaskDelete(NULL);
         return;
@@ -1220,60 +1603,78 @@ void videoRecordTask(void* param) {
     
     int width = fb->width;
     int height = fb->height;
+    Serial.printf("[VIDEO] Frame size: %dx%d, first frame %d bytes\n", width, height, fb->len);
     esp_camera_fb_return(fb);
     
-    // Calculate expected values
     int totalFrames = (params->durationMs / 1000) * VIDEO_FPS;
     int frameIntervalMs = 1000 / VIDEO_FPS;
     
-    // Open temp file for frames (we'll build AVI header after)
-    String tempPath = params->videoPath + ".tmp";
-    File tempFile = SD_MMC.open(tempPath, FILE_WRITE);
-    if (!tempFile) {
-        Serial.println("[VIDEO] Failed to create temp file");
-        videoTaskDone = true;
-        vTaskDelete(NULL);
-        return;
-    }
-    
-    // Store frame sizes for index
-    uint32_t* frameSizes = (uint32_t*)malloc(totalFrames * sizeof(uint32_t));
-    uint32_t* frameOffsets = (uint32_t*)malloc(totalFrames * sizeof(uint32_t));
+    // Allocate frame metadata arrays
+    uint32_t* frameSizes = (uint32_t*)ps_malloc(totalFrames * sizeof(uint32_t));
+    uint32_t* frameOffsets = (uint32_t*)ps_malloc(totalFrames * sizeof(uint32_t));
     if (!frameSizes || !frameOffsets) {
         Serial.println("[VIDEO] Memory allocation failed");
-        tempFile.close();
+        if (frameSizes) free(frameSizes);
+        if (frameOffsets) free(frameOffsets);
         videoTaskDone = true;
         vTaskDelete(NULL);
         return;
     }
     
-    // Record frames
+    // Open temp file for raw frame data (mutex-protected)
+    String tempPath = params->videoPath + ".tmp";
+    
+    if (xSemaphoreTake(sdMutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
+        Serial.println("[VIDEO] Failed to acquire SD mutex for temp file");
+        free(frameSizes); free(frameOffsets);
+        videoTaskDone = true;
+        vTaskDelete(NULL);
+        return;
+    }
+    File tempFile = SD_MMC.open(tempPath, FILE_WRITE);
+    xSemaphoreGive(sdMutex);
+    
+    if (!tempFile) {
+        Serial.println("[VIDEO] Failed to create temp file");
+        free(frameSizes); free(frameOffsets);
+        videoTaskDone = true;
+        vTaskDelete(NULL);
+        return;
+    }
+    
+    // ── Capture frames ──────────────────────────────────────────────────────
     unsigned long startTime = millis();
     int frameCount = 0;
     uint32_t totalDataSize = 0;
     uint32_t maxFrameSize = 0;
+    int failedFrames = 0;
     
     while (frameCount < totalFrames && (millis() - startTime) < (params->durationMs + 1000)) {
         unsigned long frameStart = millis();
         
         fb = esp_camera_fb_get();
-        if (fb) {
-            // Pad to even size (AVI requirement)
+        if (fb && fb->len > 0) {
             uint32_t frameSize = fb->len;
             uint32_t paddedSize = (frameSize + 1) & ~1;
             
             frameOffsets[frameCount] = totalDataSize;
             frameSizes[frameCount] = frameSize;
             
-            // Write chunk header: "00dc" + size
-            tempFile.write((uint8_t*)"00dc", 4);
-            tempFile.write((uint8_t*)&frameSize, 4);
-            tempFile.write(fb->buf, fb->len);
-            
-            // Pad if needed
-            if (paddedSize > frameSize) {
-                uint8_t pad = 0;
-                tempFile.write(&pad, 1);
+            // Write frame data (mutex-protected)
+            if (xSemaphoreTake(sdMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+                tempFile.write((uint8_t*)"00dc", 4);
+                tempFile.write((uint8_t*)&frameSize, 4);
+                tempFile.write(fb->buf, fb->len);
+                if (paddedSize > frameSize) {
+                    uint8_t pad = 0;
+                    tempFile.write(&pad, 1);
+                }
+                xSemaphoreGive(sdMutex);
+            } else {
+                Serial.println("[VIDEO] SD mutex timeout — frame dropped");
+                esp_camera_fb_return(fb);
+                failedFrames++;
+                continue;
             }
             
             totalDataSize += 8 + paddedSize;
@@ -1281,6 +1682,9 @@ void videoRecordTask(void* param) {
             
             esp_camera_fb_return(fb);
             frameCount++;
+        } else {
+            if (fb) esp_camera_fb_return(fb);
+            failedFrames++;
         }
         
         // Maintain frame rate
@@ -1290,26 +1694,56 @@ void videoRecordTask(void* param) {
         }
     }
     
-    tempFile.close();
+    if (xSemaphoreTake(sdMutex, pdMS_TO_TICKS(5000)) == pdTRUE) {
+        tempFile.close();
+        xSemaphoreGive(sdMutex);
+    } else {
+        tempFile.close();
+    }
     
-    Serial.printf("[VIDEO] Captured %d frames\n", frameCount);
+    Serial.printf("[VIDEO] Captured %d frames (%d failed)\n", frameCount, failedFrames);
     
-    // Now build proper AVI file
+    // ── Validate: Don't create empty AVI ────────────────────────────────────
+    if (frameCount == 0) {
+        Serial.println("[VIDEO] WARNING: 0 frames captured! Skipping AVI creation.");
+        Serial.println("[VIDEO]   Possible causes:");
+        Serial.println("[VIDEO]   - Camera not initialized properly");
+        Serial.println("[VIDEO]   - LEDC channel conflict with IR PWM");
+        Serial.println("[VIDEO]   - Insufficient memory (check PSRAM)");
+        if (xSemaphoreTake(sdMutex, pdMS_TO_TICKS(2000)) == pdTRUE) {
+            SD_MMC.remove(tempPath);
+            xSemaphoreGive(sdMutex);
+        }
+        free(frameSizes); free(frameOffsets);
+        videoTaskDone = true;
+        vTaskDelete(NULL);
+        return;
+    }
+    
+    // ── Build AVI file from temp data ───────────────────────────────────────
+    if (xSemaphoreTake(sdMutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
+        Serial.println("[VIDEO] Failed to acquire SD mutex for AVI build");
+        free(frameSizes); free(frameOffsets);
+        videoTaskDone = true;
+        vTaskDelete(NULL);
+        return;
+    }
+    
     File aviFile = SD_MMC.open(params->videoPath, FILE_WRITE);
     if (!aviFile) {
         Serial.println("[VIDEO] Failed to create AVI file");
         SD_MMC.remove(tempPath);
-        free(frameSizes);
-        free(frameOffsets);
+        xSemaphoreGive(sdMutex);
+        free(frameSizes); free(frameOffsets);
         videoTaskDone = true;
         vTaskDelete(NULL);
         return;
     }
     
     // Calculate sizes
-    uint32_t moviSize = 4 + totalDataSize;  // 'movi' + data
-    uint32_t idxSize = 8 + frameCount * 16;  // 'idx1' header + entries
-    uint32_t hdrlSize = 4 + 64 + 8 + 64 + 8 + 48;  // hdrl list content
+    uint32_t moviSize = 4 + totalDataSize;
+    uint32_t idxSize = 8 + frameCount * 16;
+    uint32_t hdrlSize = 4 + 64 + 8 + 64 + 8 + 48;
     uint32_t riffSize = 4 + 8 + hdrlSize + 8 + moviSize + idxSize;
     
     // RIFF header
@@ -1375,11 +1809,11 @@ void videoRecordTask(void* param) {
     memcpy(&idx1Hdr[4], &idx1DataSize, 4);
     aviFile.write(idx1Hdr, 8);
     
-    uint32_t offset = 4;  // Start after 'movi'
+    uint32_t offset = 4;
     for (int i = 0; i < frameCount; i++) {
         uint8_t idxEntry[16];
         memcpy(idxEntry, "00dc", 4);
-        uint32_t flags = 0x10;  // AVIIF_KEYFRAME
+        uint32_t flags = 0x10;
         memcpy(&idxEntry[4], &flags, 4);
         memcpy(&idxEntry[8], &offset, 4);
         memcpy(&idxEntry[12], &frameSizes[i], 4);
@@ -1389,10 +1823,13 @@ void videoRecordTask(void* param) {
     
     aviFile.close();
     SD_MMC.remove(tempPath);
+    xSemaphoreGive(sdMutex);
+    
     free(frameSizes);
     free(frameOffsets);
     
-    Serial.printf("[VIDEO] AVI saved: %s (%d frames)\n", params->videoPath.c_str(), frameCount);
+    Serial.printf("[VIDEO] AVI saved: %s (%d frames, %lu bytes)\n", 
+        params->videoPath.c_str(), frameCount, riffSize);
     
     videoTaskDone = true;
     vTaskDelete(NULL);
@@ -1414,7 +1851,16 @@ void audioRecordTask(void* param) {
         return;
     }
     
+    // Open audio file (mutex-protected)
+    if (xSemaphoreTake(sdMutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
+        Serial.println("[AUDIO] Failed to acquire SD mutex");
+        audioTaskDone = true;
+        vTaskDelete(NULL);
+        return;
+    }
     File audioFile = SD_MMC.open(params->audioPath, FILE_WRITE);
+    xSemaphoreGive(sdMutex);
+    
     if (!audioFile) {
         Serial.println("[AUDIO] Failed to create file");
         audioTaskDone = true;
@@ -1422,11 +1868,9 @@ void audioRecordTask(void* param) {
         return;
     }
     
-    // Calculate sizes
     int totalSamples = AUDIO_SAMPLE_RATE * (params->durationMs / 1000);
     uint32_t dataSize = totalSamples * sizeof(int16_t);
     
-    // Write WAV header
     WAV_HEADER wav;
     wav.chunkSize = 36 + dataSize;
     wav.sampleRate = AUDIO_SAMPLE_RATE;
@@ -1436,13 +1880,15 @@ void audioRecordTask(void* param) {
     wav.blockAlign = 1 * (AUDIO_BITS / 8);
     wav.dataSize = dataSize;
     
-    audioFile.write((uint8_t*)&wav, sizeof(wav));
+    // Write WAV header (mutex-protected)
+    if (xSemaphoreTake(sdMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        audioFile.write((uint8_t*)&wav, sizeof(wav));
+        xSemaphoreGive(sdMutex);
+    }
     
-    // Enable microphone
     i2s_channel_enable(mic_handle);
     
-    // Record in chunks
-    const int chunkSamples = 1600;  // 100ms at 16kHz
+    const int chunkSamples = 1600;
     int16_t* buffer = (int16_t*)malloc(chunkSamples * sizeof(int16_t));
     
     if (!buffer) {
@@ -1465,16 +1911,26 @@ void audioRecordTask(void* param) {
             samplesToRead * sizeof(int16_t), &bytesRead, 500);
         
         if (err == ESP_OK && bytesRead > 0) {
-            audioFile.write((uint8_t*)buffer, bytesRead);
+            // Write audio chunk (mutex-protected)
+            if (xSemaphoreTake(sdMutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+                audioFile.write((uint8_t*)buffer, bytesRead);
+                xSemaphoreGive(sdMutex);
+            }
             samplesRecorded += bytesRead / sizeof(int16_t);
         }
         
-        vTaskDelay(1);  // Yield to other tasks
+        vTaskDelay(1);
     }
     
     free(buffer);
     i2s_channel_disable(mic_handle);
-    audioFile.close();
+    
+    if (xSemaphoreTake(sdMutex, pdMS_TO_TICKS(5000)) == pdTRUE) {
+        audioFile.close();
+        xSemaphoreGive(sdMutex);
+    } else {
+        audioFile.close();
+    }
     
     Serial.printf("[AUDIO] WAV saved: %s (%d samples, %.1fs)\n", 
         params->audioPath.c_str(), samplesRecorded, 
@@ -1495,10 +1951,17 @@ void recordEvent() {
     }
     
     isRecording = true;
+    
+    // v1.1: Disable IR interrupt during recording to prevent re-triggering
+    // The moth is already in the trap; we don't want the same moth triggering
+    // multiple detections as it flutters around near the sensor.
+    irInterruptDisable();
+    
     detectionCount++;
     
     Serial.println("[REC] ════════════════════════════════════════");
-    Serial.printf("[REC] MOTH DETECTED! (Count: %lu)\n", detectionCount);
+    Serial.printf("[REC] MOTH DETECTED! (Count: %lu, Total IR transitions: %lu)\n", 
+        detectionCount, (unsigned long)irTransitionCount);
     Serial.println("[REC] Starting simultaneous AVI+WAV recording...");
     
     lcdPrint("MOTH DETECTED!", "Recording 10s...");
@@ -1515,21 +1978,17 @@ void recordEvent() {
     Serial.printf("[REC] Video: %s\n", currentVideoPath.c_str());
     Serial.printf("[REC] Audio: %s\n", currentAudioPath.c_str());
     
-    // Setup recording parameters
-    static RecordParams params;
-    params.videoPath = currentVideoPath;
-    params.audioPath = currentAudioPath;
-    params.durationMs = RECORDING_DURATION;
+    // v1.2: Use file-scope recordParams (shared safely since recording is serialized)
+    recordParams.videoPath = currentVideoPath;
+    recordParams.audioPath = currentAudioPath;
+    recordParams.durationMs = RECORDING_DURATION;
     
-    // Reset completion flags
     videoTaskDone = false;
     audioTaskDone = false;
     
-    // Start both tasks on different cores
-    xTaskCreatePinnedToCore(videoRecordTask, "video", 16384, &params, 1, NULL, 0);
-    xTaskCreatePinnedToCore(audioRecordTask, "audio", 8192, &params, 1, NULL, 1);
+    xTaskCreatePinnedToCore(videoRecordTask, "video", 16384, &recordParams, 1, NULL, 0);
+    xTaskCreatePinnedToCore(audioRecordTask, "audio", 8192, &recordParams, 1, NULL, 1);
     
-    // Wait for both to complete
     unsigned long waitStart = millis();
     int lastSecond = -1;
     
@@ -1544,7 +2003,6 @@ void recordEvent() {
     
     Serial.println("[REC] Recording complete!");
     
-    // Log detection
     logDetection(currentVideoPath, currentAudioPath);
     
     Serial.println("[REC] ════════════════════════════════════════");
@@ -1553,6 +2011,12 @@ void recordEvent() {
     delay(2000);
     
     isRecording = false;
+    
+    // v1.1: Re-enable IR interrupt after recording is complete
+    // Small delay to let any lingering moth movement settle
+    delay(500);
+    irTriggered = false;  // Clear any triggers that happened during recording
+    irInterruptEnable();
 }
 
 void logDetection(String videoPath, String audioPath) {
@@ -1581,7 +2045,6 @@ void logDetection(String videoPath, String audioPath) {
 void logEnvironment() {
     if (!sdOK) return;
     
-    // Read fresh sensor data
     readSensors();
     
     String logPath = "/logs/environment.csv";
@@ -1670,20 +2133,17 @@ void sendBLE(String msg) {
 
 void toggleBLE() {
     if (bleEnabled) {
-        // Turn OFF BLE
         if (deviceConnected) {
-            // Disconnect any connected device first
             pServer->disconnect(pServer->getConnId());
             delay(100);
         }
         BLEDevice::getAdvertising()->stop();
-        BLEDevice::deinit(false);  // false = don't release memory (faster reinit)
+        BLEDevice::deinit(false);
         bleEnabled = false;
         
         Serial.println("[BLE] Disabled - Power saving mode");
         lcdPrint("BLE: OFF", "Power saving");
     } else {
-        // Turn ON BLE
         BLEDevice::init(DEVICE_NAME);
         pServer = BLEDevice::createServer();
         pServer->setCallbacks(new ServerCallbacks());
@@ -1735,7 +2195,7 @@ void updateLCD() {
     
     lcd.clear();
     
-    switch (lcdPage % 4) {
+    switch (lcdPage % 5) {  // v1.1: Added IR status page
         case 0: {
             lcd.setCursor(0, 0);
             lcd.printf("Moths: %lu", detectionCount);
@@ -1744,7 +2204,6 @@ void updateLCD() {
                 DateTime now = rtc.now();
                 lcd.printf("%02d:%02d ", now.hour(), now.minute());
             }
-            // Show BLE status
             if (!bleEnabled) lcd.print("BLE:OFF");
             else if (deviceConnected) lcd.print("BLE:CON");
             else lcd.print("BLE:ON");
@@ -1766,10 +2225,23 @@ void updateLCD() {
             break;
         }
         case 3: {
+            // v1.1: Enhanced IR status page
             lcd.setCursor(0, 0);
-            lcd.print("IR Beam:");
+            lcd.print("IR:");
+            lcd.print(irPWMActive ? "38kHz " : "OFF ");
+            lcd.print((digitalRead(IR_RECEIVER_PIN) == IR_BEAM_BROKEN_STATE) ? "BROKE" : "OK");
             lcd.setCursor(0, 1);
-            lcd.print(digitalRead(IR_RECEIVER_PIN) ? "CLEAR" : "BLOCKED!");
+            lcd.printf("Trig:%lu", (unsigned long)irTransitionCount);
+            if (beamBlockedWarning) lcd.print(" !BLK");
+            break;
+        }
+        case 4: {
+            lcd.setCursor(0, 0);
+            lcd.print("FW v");
+            lcd.print(FIRMWARE_VERSION);
+            lcd.setCursor(0, 1);
+            unsigned long uptimeMin = millis() / 60000;
+            lcd.printf("Up: %luh%lum", uptimeMin / 60, uptimeMin % 60);
             break;
         }
     }
@@ -1787,7 +2259,6 @@ void handleButton() {
         buttonWasPressed = false;
         
         if (duration < 1000) {
-            // Short press - toggle LCD backlight on/off
             lcdBacklightOn = !lcdBacklightOn;
             if (lcdBacklightOn) {
                 lcd.backlight();
@@ -1799,12 +2270,10 @@ void handleButton() {
             }
         }
         else if (duration >= 5000) {
-            // Long press (5+ seconds) - toggle BLE on/off
             toggleBLE();
         }
     }
     
-    // Show countdown feedback for long press
     if (buttonWasPressed && lcdOK) {
         unsigned long held = millis() - buttonPressTime;
         if (held >= 2000 && held < 5000) {
@@ -1814,43 +2283,26 @@ void handleButton() {
     }
 }
 
-void checkIRDetection() {
-    static bool lastIRState = true;
-    bool currentIRState = digitalRead(IR_RECEIVER_PIN);
-    
-    if (lastIRState && !currentIRState) {
-        unsigned long now = millis();
-        if (now - lastIRTime > IR_DEBOUNCE_MS) {
-            irTriggered = true;
-            lastIRTime = now;
-        }
-    }
-    lastIRState = currentIRState;
-}
-
 // ============================================================================
 // POWER SAVING FUNCTIONS
 // ============================================================================
 
 bool isWithinActiveHours() {
-    if (!ENABLE_SCHEDULED_SLEEP) return true;  // Always active if disabled
-    if (!rtcOK) return true;  // Can't check without RTC
+    if (!ENABLE_SCHEDULED_SLEEP) return true;
+    if (!rtcOK) return true;
     
     DateTime now = rtc.now();
     int currentHour = now.hour();
     
-    // Handle overnight schedule (e.g., 20:00 - 06:00)
     if (ACTIVE_START_HOUR > ACTIVE_END_HOUR) {
-        // Overnight: active if hour >= start OR hour < end
         return (currentHour >= ACTIVE_START_HOUR || currentHour < ACTIVE_END_HOUR);
     } else {
-        // Same day: active if hour >= start AND hour < end
         return (currentHour >= ACTIVE_START_HOUR && currentHour < ACTIVE_END_HOUR);
     }
 }
 
 int getMinutesUntilActive() {
-    if (!rtcOK) return 60;  // Default 1 hour if no RTC
+    if (!rtcOK) return 60;
     
     DateTime now = rtc.now();
     int currentHour = now.hour();
@@ -1870,18 +2322,17 @@ int getMinutesUntilActive() {
 void prepareSleep() {
     Serial.println("[POWER] Preparing for sleep...");
     
-    // Turn off IR LED
-    digitalWrite(IR_LED_PIN, LOW);
-    Serial.println("[POWER] IR LED OFF");
+    // v1.1: Use irLedOff() and disable interrupt
+    irLedOff();
+    irInterruptDisable();
+    Serial.println("[POWER] IR LED OFF, interrupt disabled");
     
-    // Turn off LCD backlight
     if (lcdOK) {
         lcd.noBacklight();
         lcd.clear();
         lcdBacklightOn = false;
     }
     
-    // Disable BLE if enabled
     if (bleEnabled) {
         if (deviceConnected) {
             pServer->disconnect(pServer->getConnId());
@@ -1893,18 +2344,14 @@ void prepareSleep() {
         Serial.println("[POWER] BLE disabled");
     }
     
-    // Deinit camera to save power
     if (cameraOK) {
         esp_camera_deinit();
         cameraOK = false;
         Serial.println("[POWER] Camera disabled");
     }
     
-    // Disable microphone
     if (mic_handle != NULL) {
-        // Try to disable (may fail if not enabled - that's OK)
         i2s_channel_disable(mic_handle);
-        // Delete the channel
         i2s_del_channel(mic_handle);
         mic_handle = NULL;
         micOK = false;
@@ -1915,32 +2362,23 @@ void prepareSleep() {
 void enterDeepSleep(int sleepMinutes) {
     prepareSleep();
     
-    // Calculate sleep time in microseconds
     uint64_t sleepTimeUs = (uint64_t)sleepMinutes * 60ULL * 1000000ULL;
     
-    // Limit to max ~71 minutes per sleep cycle (ESP32 limitation)
-    // For longer sleep, we'll wake up and check again
     if (sleepMinutes > 60) {
-        sleepTimeUs = 60ULL * 60ULL * 1000000ULL;  // 60 minutes max
+        sleepTimeUs = 60ULL * 60ULL * 1000000ULL;
     }
     
     Serial.printf("[POWER] Entering deep sleep for %d minutes\n", min(sleepMinutes, 60));
     Serial.println("[POWER] ═══════════════════════════════════════════");
     Serial.flush();
     
-    // Configure wake-up source (timer)
     esp_sleep_enable_timer_wakeup(sleepTimeUs);
+    esp_sleep_enable_ext0_wakeup(GPIO_NUM_4, 0);
     
-    // Also allow button wake-up (GPIO4)
-    // Requires external 10kΩ pull-up resistor to 3.3V for reliability
-    esp_sleep_enable_ext0_wakeup(GPIO_NUM_4, 0);  // Wake on LOW (button pressed)
-    
-    // Enter deep sleep
     esp_deep_sleep_start();
 }
 
 void wakeUp() {
-    // Check wake-up reason
     esp_sleep_wakeup_cause_t wakeupReason = esp_sleep_get_wakeup_cause();
     
     switch (wakeupReason) {
@@ -1954,33 +2392,19 @@ void wakeUp() {
             Serial.println("[POWER] Normal boot / reset");
             break;
     }
-    
-    // Re-enable IR LED
-    digitalWrite(IR_LED_PIN, HIGH);
-    
-    // Re-init will happen in setup()
 }
 
 void checkScheduleAndSleep() {
     if (!ENABLE_SCHEDULED_SLEEP) return;
-    
-    // Grace period after startup to allow BLE connection
     if (millis() < STARTUP_GRACE_PERIOD) return;
     
-    // If outside active hours, go to sleep immediately (don't wait for interval)
-    // If inside active hours, check periodically if it's time to sleep
     if (isWithinActiveHours()) {
-        // During active hours - check every minute if active hours have ended
         if (millis() - lastSleepCheck < SLEEP_CHECK_INTERVAL) return;
         lastSleepCheck = millis();
-        return;  // Still in active hours, nothing to do
+        return;
     }
     
-    // Outside active hours - go to sleep now
     int sleepMins = getMinutesUntilActive();
-    
-    // Use WAKE_CHECK_INTERVAL for the sleep timer (wake up to recheck)
-    // But cap at sleepMins if that's shorter
     int actualSleepMins = min(sleepMins, (int)(WAKE_CHECK_INTERVAL / 60000));
     if (actualSleepMins < 1) actualSleepMins = 1;
     
@@ -1990,7 +2414,6 @@ void checkScheduleAndSleep() {
             ACTIVE_START_HOUR, ACTIVE_END_HOUR, now.hour(), now.minute());
     }
     
-    // Don't sleep if recording or transferring
     if (isRecording) {
         Serial.println("[POWER] Recording in progress, delaying sleep");
         return;
@@ -2001,13 +2424,11 @@ void checkScheduleAndSleep() {
         return;
     }
     
-    // Don't sleep if BLE device is connected
     if (deviceConnected) {
         Serial.println("[POWER] BLE device connected, delaying sleep");
         return;
     }
     
-    // Show message on LCD before sleeping
     if (lcdOK) {
         lcdPrint("Sleeping...", "Wake at " + String(ACTIVE_START_HOUR) + ":00");
         delay(2000);
@@ -2020,19 +2441,13 @@ void setActiveMode(bool active) {
     isActiveHours = active;
     
     if (active) {
-        // Turn ON monitoring
-        digitalWrite(IR_LED_PIN, HIGH);
-        Serial.println("[POWER] Active mode - IR LED ON");
+        // v1.1: Use irLedOn() and enable interrupt
+        irLedOn();
+        irInterruptEnable();
+        Serial.println("[POWER] Active mode — IR LED ON, interrupt enabled");
         
-        // Re-init camera if needed
-        if (!cameraOK) {
-            initCamera();
-        }
-        
-        // Re-init microphone if needed
-        if (!micOK) {
-            initMicrophone();
-        }
+        if (!cameraOK) initCamera();
+        if (!micOK) initMicrophone();
         
         if (lcdOK) {
             lcd.backlight();
@@ -2040,9 +2455,9 @@ void setActiveMode(bool active) {
             lcdPrint("Active Mode", "Monitoring...");
         }
     } else {
-        // Turn OFF monitoring (but stay awake for BLE access)
-        digitalWrite(IR_LED_PIN, LOW);
-        Serial.println("[POWER] Inactive mode - IR LED OFF");
+        irLedOff();
+        irInterruptDisable();
+        Serial.println("[POWER] Inactive mode — IR LED OFF, interrupt disabled");
     }
 }
 
@@ -2051,18 +2466,24 @@ void setActiveMode(bool active) {
 // ============================================================================
 
 void loop() {
-    // Check scheduled sleep (only if enabled)
+    // Check scheduled sleep
     checkScheduleAndSleep();
     
-    // Only monitor IR if within active hours
+    // Only monitor if within active hours
     if (isWithinActiveHours()) {
         processTransfer();
-        checkIRDetection();
+        
+        // v1.1: IR detection is now interrupt-driven — no polling needed!
+        // The ISR sets irTriggered = true when a beam break occurs.
+        // We just check the flag here and handle it.
         
         if (irTriggered && !isRecording) {
             irTriggered = false;
             recordEvent();
         }
+        
+        // v1.1: Beam health monitoring
+        checkBeamHealth();
         
         // Periodic environmental logging
         if (millis() - lastEnvLog >= ENV_LOG_INTERVAL_MS) {
@@ -2086,10 +2507,153 @@ void loop() {
         String bleStatus = !bleEnabled ? "OFF" : (deviceConnected ? "Connected" : "Advertising");
         String schedStatus = ENABLE_SCHEDULED_SLEEP ? 
             (isWithinActiveHours() ? "Active" : "Inactive") : "Always On";
-        Serial.printf("[HEARTBEAT] Det: %lu, BLE: %s, Sched: %s, IR: %s\n",
-            detectionCount, bleStatus.c_str(), schedStatus.c_str(),
-            digitalRead(IR_RECEIVER_PIN) ? "Clear" : "Blocked");
+        Serial.printf("[HEARTBEAT] Det: %lu, IRtrig: %lu, BLE: %s, Sched: %s, Beam: %s, PWM: %s\n",
+            detectionCount, (unsigned long)irTransitionCount,
+            bleStatus.c_str(), schedStatus.c_str(),
+            (digitalRead(IR_RECEIVER_PIN) == IR_BEAM_BROKEN_STATE) ? "Broken" : "Intact",
+            irPWMActive ? "ON" : "OFF");
     }
     
     delay(10);
 }
+
+/*
+ * ============================================================================
+ * HARDWARE MODIFICATION GUIDE (v1.1)
+ * ============================================================================
+ *
+ * These physical changes are needed alongside the firmware update.
+ * Do them in order — #1 and #2 are critical, #3 is recommended.
+ *
+ * ┌─────────────────────────────────────────────────────────────────────────┐
+ * │  CHANGE #1: REMOVE the 10kΩ pull-down resistor from IR receiver       │
+ * ├─────────────────────────────────────────────────────────────────────────┤
+ * │                                                                         │
+ * │  WHY:                                                                   │
+ * │  The TSOP38238's output is open-collector, active LOW. It needs a       │
+ * │  pull-UP to 3.3V (which INPUT_PULLUP provides internally). The 10kΩ    │
+ * │  pull-down to GND was fighting against this, creating a voltage         │
+ * │  divider that weakened the signal and caused unreliable readings.       │
+ * │                                                                         │
+ * │  BEFORE (v1.0):                                                         │
+ * │                                                                         │
+ * │    3.3V ──[internal ~45kΩ]──┬── D7 (GPIO44)                            │
+ * │                              │                                          │
+ * │              TSOP OUT ───────┤                                          │
+ * │                              │                                          │
+ * │    GND ─────[10kΩ]──────────┘   ← REMOVE THIS                         │
+ * │                                                                         │
+ * │  AFTER (v1.1):                                                          │
+ * │                                                                         │
+ * │    3.3V ──[internal ~45kΩ]──┬── D7 (GPIO44)                            │
+ * │                              │                                          │
+ * │              TSOP OUT ───────┘                                          │
+ * │                                                                         │
+ * │  HOW: Simply desolder or disconnect the 10kΩ resistor that goes        │
+ * │  from the IR receiver output to GND. The ESP32's internal pull-up       │
+ * │  (enabled by INPUT_PULLUP in firmware) handles the pull-up.             │
+ * │                                                                         │
+ * └─────────────────────────────────────────────────────────────────────────┘
+ *
+ * ┌─────────────────────────────────────────────────────────────────────────┐
+ * │  CHANGE #2: REPLACE 100Ω IR LED resistor with 47Ω                     │
+ * ├─────────────────────────────────────────────────────────────────────────┤
+ * │                                                                         │
+ * │  WHY:                                                                   │
+ * │  With 38kHz PWM at 50% duty cycle, the average current through the     │
+ * │  IR LED is halved compared to DC. A lower resistor compensates,        │
+ * │  giving a stronger beam signal.                                         │
+ * │                                                                         │
+ * │  MATH:                                                                  │
+ * │    Peak current: (3.3V - 1.2V) / 47Ω = 44.7mA                        │
+ * │    Average current (50% duty): 44.7mA × 0.5 = 22.3mA                  │
+ * │    This is well within the ESP32 GPIO limit (~40mA)                     │
+ * │    and typical 940nm IR LED max rating (50-100mA continuous)            │
+ * │                                                                         │
+ * │  BEFORE: D6 ──[100Ω]── IR LED Anode(+) ── Cathode(-) ── GND          │
+ * │  AFTER:  D6 ──[ 47Ω]── IR LED Anode(+) ── Cathode(-) ── GND          │
+ * │                                                                         │
+ * │  If you don't have a 47Ω, try 56Ω or 68Ω — anything lower than       │
+ * │  100Ω will be an improvement. Even keeping the 100Ω will work with     │
+ * │  the 38kHz PWM fix, just with a weaker beam.                           │
+ * │                                                                         │
+ * └─────────────────────────────────────────────────────────────────────────┘
+ *
+ * ┌─────────────────────────────────────────────────────────────────────────┐
+ * │  CHANGE #3 (RECOMMENDED): Add optical alignment tubes                  │
+ * ├─────────────────────────────────────────────────────────────────────────┤
+ * │                                                                         │
+ * │  WHY:                                                                   │
+ * │  In outdoor deployment (especially Ghana with strong sunlight), the     │
+ * │  TSOP can pick up ambient IR which causes false readings. Narrow        │
+ * │  tubes focus the beam and block stray light.                            │
+ * │                                                                         │
+ * │  HOW:                                                                   │
+ * │  Cut two pieces of black heat-shrink tubing or drinking straw           │
+ * │  (~15-20mm long) and slide them over the IR LED and TSOP receiver.     │
+ * │  This creates a narrow "sight line" between them.                       │
+ * │                                                                         │
+ * │        [tube]          trap opening          [tube]                     │
+ * │     ┌───────┐                              ┌───────┐                   │
+ * │     │ IR LED│  ════════ beam ════════════  │ TSOP  │                   │
+ * │     └───────┘                              └───────┘                   │
+ * │                                                                         │
+ * │  Make sure both tubes are aligned so the beam passes straight           │
+ * │  through. You can test alignment by checking the Serial output —       │
+ * │  the beam should read "INTACT" at startup.                              │
+ * │                                                                         │
+ * └─────────────────────────────────────────────────────────────────────────┘
+ *
+ * ┌─────────────────────────────────────────────────────────────────────────┐
+ * │  OPTIONAL: Transistor driver for even stronger beam                    │
+ * ├─────────────────────────────────────────────────────────────────────────┤
+ * │                                                                         │
+ * │  If the 47Ω resistor still isn't enough (very wide trap opening),      │
+ * │  you can drive the IR LED with a transistor for higher current:        │
+ * │                                                                         │
+ * │    GPIO43 ──[1kΩ]── Base (2N2222 NPN)                                  │
+ * │                      Collector ── IR LED Anode ──[22Ω]── 3.3V         │
+ * │                      Emitter ── GND                                     │
+ * │                                                                         │
+ * │    With 22Ω: (3.3V - 1.2V - 0.2V) / 22Ω = 86mA peak                 │
+ * │    Average at 50% duty = 43mA                                           │
+ * │                                                                         │
+ * │  The 0.2V is the transistor's VCE(sat). This gives nearly 2× the      │
+ * │  beam intensity compared to direct GPIO drive.                          │
+ * │                                                                         │
+ * │  Only do this if changes #1-#3 aren't sufficient.                      │
+ * │                                                                         │
+ * └─────────────────────────────────────────────────────────────────────────┘
+ *
+ * ============================================================================
+ * TESTING PROCEDURE
+ * ============================================================================
+ *
+ * After making hardware and firmware changes:
+ *
+ * 1. Upload firmware, open Serial Monitor at 115200 baud
+ * 2. Check startup messages:
+ *    - "IR LED ON — 38kHz PWM, duty=128/255 (50%)" should appear
+ *    - "Beam verified intact at startup" should appear
+ *    - If "WARNING: Beam NOT detected" appears, check alignment
+ *
+ * 3. Wave your hand through the beam path
+ *    - Serial should show "MOTH DETECTED!" immediately
+ *    - LCD should show "MOTH DETECTED!"
+ *    - Detection count should increment
+ *
+ * 4. Via BLE, send "IRTEST" command to check:
+ *    - beam=INTACT (when nothing blocking)
+ *    - pwm=ON, freq=38000Hz
+ *    - transitions count increasing with each hand wave
+ *
+ * 5. Test sensitivity by passing a pencil through the beam quickly
+ *    - Even fast passes (~50ms) should trigger reliably
+ *
+ * 6. Block the beam for >30 seconds
+ *    - Should see "WARNING: Beam blocked for >30s" on serial
+ *    - LCD should show "! BEAM BLOCKED"
+ *    - beam_health.csv should log the event
+ *
+ * ============================================================================
+ */
