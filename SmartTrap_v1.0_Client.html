@@ -690,15 +690,16 @@
             try {
                 log('Searching for SmartTrap device...');
                 
-                // Search for SmartTrap devices
-                try {
-                    device = await navigator.bluetooth.requestDevice({
-                        filters: [{ namePrefix: 'SmartTrap' }],
-                        optionalServices: [SERVICE_UUID]
-                    });
-                } catch (e) {
-                    throw e;
-                }
+                // Search for SmartTrap devices by name OR service UUID.
+                // The name filter matches the scan response packet, the service
+                // filter matches the advertising packet — either will find the device.
+                device = await navigator.bluetooth.requestDevice({
+                    filters: [
+                        { namePrefix: 'SmartTrap' },
+                        { services: [SERVICE_UUID] }
+                    ],
+                    optionalServices: [SERVICE_UUID]
+                });
                 
                 log(`Found: ${device.name}`);
                 

@@ -34,10 +34,10 @@ SmartTrap is a low-cost IoT device that automates the monitoring of Fall Armywor
 - **Dual CSV Logging** - Separate files for environmental data and detection events
 - **SD Card Storage** - Local data storage with organized folder structure
 
-### Connectivity
-- **USB Mass Storage** - Press button at system boot up for easy data offload (plug in, wait 10s, copy files)
-- **Bluetooth Low Energy (BLE)** - Wireless data transfer and device control
-- **Web Client Interface** - Browser-based monitoring dashboard (Chrome)
+### Data Management
+- **USB Mass Storage** - Press button at boot for easy data offload (plug in, copy files, delete to reset)
+- **Auto Count Recovery** - Detection count derived from SD card data; survives reboots, resets on data deletion
+- **Bluetooth Low Energy (BLE)** - Optional wireless monitoring for field diagnostics
 - **Password Protection** - Secure access to files and device reset
 
 ### Power Management
@@ -186,21 +186,19 @@ When you plug in the device, you have 10 seconds to choose:
 4. Copy your files
 5. Eject and unplug
 
-### Web Client (Wireless)
+### Resetting Detection Count
 
-1. Open `SmartTrap_v1.0_Client.html` in **Google Chrome**
-2. Click "Connect to Trap"
-3. Select your SmartTrap device from the list
+The moth count is derived from the data on the SD card. To reset:
+1. Connect via **USB Drive Mode** (press button at boot)
+2. Delete the `/logs/` and `/events/` folders
+3. Reboot — count starts at 0
+
+### Web Client (Optional BLE Monitoring)
+
+1. Serve `SmartTrap_v1.0_Client.html` via localhost (required for Web Bluetooth)
+2. Open in **Google Chrome**
+3. Click "Connect to Trap" and select your device
 4. Enter password when prompted (default: `smart2025`)
-
-### Dashboard Features
-
-- **Device Status** - Firmware version, uptime, RTC time, schedule
-- **Detection Counter** - Total moth detections
-- **Component Status** - Health check of all hardware
-- **Storage** - SD card usage with visual progress bar
-- **Sensors** - Live environmental readings
-- **Auto-Refresh** - Set interval from 10s to 30min
 
 ### Button Controls
 
@@ -264,10 +262,10 @@ timestamp,detection_num,air_temp,humidity,soil_temp,soil_moisture,video_file,aud
 
 | Document | Description |
 |----------|-------------|
-| [Hardware Guide](docs/SmartTrap_v1.0_Hardware_Guide.docx) | Wiring diagrams, component list, assembly |
-| [Firmware Guide](docs/SmartTrap_v1.0_Firmware_Guide.docx) | Arduino setup, configuration, BLE commands |
-| [Field Guide](docs/SmartTrap_v1.0_Field_Guide.docx) | Deployment, maintenance, troubleshooting |
-| [Quick Reference](docs/SmartTrap_v1.0_Quick_Reference.docx) | Single-page printable card |
+| [Hardware Guide](docs/SmartTrap_v1.0_Hardware_Guide.md) | Wiring diagrams, component list, assembly |
+| [Firmware Guide](docs/SmartTrap_v1.0_Firmware_Guide.md) | Arduino setup, configuration, BLE commands |
+| [Field Guide](docs/SmartTrap_v1.0_Field_Guide.md) | Deployment, maintenance, troubleshooting |
+| [Quick Reference](docs/SmartTrap_v1.0_Quick_Reference.md) | Single-page printable card |
 
 ---
 

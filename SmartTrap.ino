@@ -1,16 +1,27 @@
 /*
  * ============================================================================
- * SMARTTRAP FIRMWARE v1.2
+ * SMARTTRAP FIRMWARE v1.3
  * ============================================================================
- * 
+ *
  * Copyright (c) 2024 Penn State University / CSIR-CRI Ghana
  * Licensed under CC BY-NC-SA 4.0
  * https://creativecommons.org/licenses/by-nc-sa/4.0/
- * 
+ *
  * Attribution required. Non-commercial use only.
- * 
+ *
  * ============================================================================
- * 
+ *
+ * CHANGELOG v1.3 (Simplified Operations):
+ * ────────────────────────────────────────────────────
+ * [CHANGE] Detection count now derived from detections.csv on boot.
+ *          Deleting data via USB Drive Mode naturally resets the count.
+ * [CHANGE] BLE is now optional — all critical operations work without it.
+ *          BLE remains available for field monitoring if needed.
+ * [CHANGE] LCD simplified to 2 pages: moth count + BLE status, FW + uptime.
+ *          Removed soil/moisture/IR diagnostic pages.
+ * [FIX] BLE advertising now explicitly splits name into scan response packet
+ *       for better macOS/Chrome Web Bluetooth compatibility.
+ *
  * CHANGELOG v1.2 (Video Recording Fix):
  * ────────────────────────────────────────────────────
  * [FIX] LEDC channel conflict: Camera XCLK used LEDC_CHANNEL_0, and
@@ -142,7 +153,7 @@
 // ============================================================================
 
 #define DEVICE_NAME         "SmartTrap_001"
-#define FIRMWARE_VERSION    "1.2"
+#define FIRMWARE_VERSION    "1.3"
 #define AUTH_PASSWORD       "smart2025"
 
 // ── IR Detection Configuration (v1.1) ──────────────────────────────────────
@@ -1203,7 +1214,7 @@ void setup() {
     
     Serial.println();
     Serial.println("╔══════════════════════════════════════════╗");
-    Serial.println("║     SMARTTRAP FIRMWARE v1.2              ║");
+    Serial.println("║     SMARTTRAP FIRMWARE v1.3              ║");
     Serial.println("║   IR Sensitivity + Power Saving          ║");
     Serial.println("╚══════════════════════════════════════════╝");
     Serial.println();
@@ -1293,7 +1304,7 @@ void setup() {
     readSensors();
     
     if (isActiveHours) {
-        lcdPrint("SmartTrap v1.2", "Monitoring...");
+        lcdPrint("SmartTrap v1.3", "Monitoring...");
         Serial.println(">>> System ready. Monitoring for moths... <<<");
     } else {
         String wakeTime = String(ACTIVE_START_HOUR) + ":00";
@@ -1323,14 +1334,14 @@ void initComponents() {
     }
     if (!lcdOK) Serial.println("FAIL");
     
-    lcdPrint("SmartTrap v1.2", "Starting...");
+    lcdPrint("SmartTrap v1.3", "Starting...");
     
     Serial.print("[RTC] Initializing... ");
     if (rtc.begin()) {
-        if (rtc.lostPower()) {
-            Serial.println("[RTC] Lost power — setting to compile time");
-            rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
-        }
+        // Always sync RTC to computer time on firmware upload.
+        // The compile-time timestamp updates every flash, so the
+        // RTC stays accurate without any manual intervention.
+        rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
         rtcOK = true;
         DateTime now = rtc.now();
         Serial.printf("OK (%04d-%02d-%02d %02d:%02d:%02d)\n",
@@ -1338,8 +1349,7 @@ void initComponents() {
             now.hour(), now.minute(), now.second());
         // Warn if time looks unreasonable
         if (now.year() < 2024 || now.year() > 2035) {
-            Serial.println("[RTC] ⚠ WARNING: Year looks wrong! Use BLE SETTIME command to fix.");
-            Serial.println("[RTC]   Example: AUTH:smart2025  then  SETTIME:2026-02-15 14:30:00");
+            Serial.println("[RTC] ⚠ WARNING: Year looks wrong! Re-flash firmware to reset RTC.");
         }
     } else Serial.println("FAIL");
     
@@ -1380,27 +1390,30 @@ void initSDCard() {
 }
 
 void restoreDetectionCount() {
+    // v1.3: Detection count is derived from data on the SD card.
+    // If the user deletes data via USB Drive Mode, count resets naturally.
     if (!sdOK) return;
-    
+
+    // Primary: count rows in detections.csv (most accurate)
     File file = SD_MMC.open("/logs/detections.csv", FILE_READ);
-    if (!file) {
-        Serial.println("[SD] No previous detections.csv - starting from 0");
-        detectionCount = 0;
+    if (file) {
+        unsigned long lineCount = 0;
+        bool firstLine = true;
+        while (file.available()) {
+            String line = file.readStringUntil('\n');
+            if (firstLine) { firstLine = false; continue; }
+            if (line.length() > 0) lineCount++;
+        }
+        file.close();
+        detectionCount = lineCount;
+        Serial.printf("[SD] Detection count from CSV: %lu\n", detectionCount);
         return;
     }
-    
-    unsigned long lineCount = 0;
-    bool firstLine = true;
-    
-    while (file.available()) {
-        String line = file.readStringUntil('\n');
-        if (firstLine) { firstLine = false; continue; }
-        if (line.length() > 0) lineCount++;
-    }
-    file.close();
-    
-    detectionCount = lineCount;
-    Serial.printf("[SD] Restored detection count: %lu\n", detectionCount);
+
+    // Fallback: no CSV found — start fresh
+    Serial.println("[SD] No detections.csv found - count = 0");
+    Serial.println("[SD] To reset count: delete /logs and /events via USB Drive Mode");
+    detectionCount = 0;
 }
 
 void initCamera() {
@@ -1481,29 +1494,48 @@ void initMicrophone() {
 
 void setupBLE() {
     Serial.print("[BLE] Initializing... ");
-    
+
     BLEDevice::init(DEVICE_NAME);
     pServer = BLEDevice::createServer();
     pServer->setCallbacks(new ServerCallbacks());
-    
+
     BLEService* pService = pServer->createService(SERVICE_UUID);
-    
+
     pTxCharacteristic = pService->createCharacteristic(
         CHARACTERISTIC_UUID_TX,
         BLECharacteristic::PROPERTY_NOTIFY | BLECharacteristic::PROPERTY_READ
     );
     pTxCharacteristic->addDescriptor(new BLE2902());
-    
+
     BLECharacteristic* pRxCharacteristic = pService->createCharacteristic(
         CHARACTERISTIC_UUID_RX,
         BLECharacteristic::PROPERTY_WRITE
     );
     pRxCharacteristic->setCallbacks(new RxCallbacks());
-    
+
     pService->start();
-    BLEDevice::getAdvertising()->addServiceUUID(SERVICE_UUID);
-    BLEDevice::getAdvertising()->start();
-    
+
+    // Explicitly split advertising data across two packets for macOS/Chrome
+    // compatibility. The advertising packet (31 bytes max) carries the service
+    // UUID so Chrome's filter can find it. The scan response packet carries the
+    // device name so it shows as "SmartTrap_001" instead of "Unknown Device".
+    BLEAdvertising* pAdvertising = BLEDevice::getAdvertising();
+
+    // Packet 1: Advertising data — flags + service UUID
+    BLEAdvertisementData advData;
+    advData.setFlags(ESP_BLE_ADV_FLAG_GEN_DISC | ESP_BLE_ADV_FLAG_BREDR_NOT_SPT);
+    advData.setCompleteServices(BLEUUID(SERVICE_UUID));
+    pAdvertising->setAdvertisementData(advData);
+
+    // Packet 2: Scan response — device name + connection intervals
+    BLEAdvertisementData scanResponse;
+    scanResponse.setName(DEVICE_NAME);
+    pAdvertising->setScanResponseData(scanResponse);
+
+    pAdvertising->setMinPreferred(0x06);  // 7.5ms
+    pAdvertising->setMaxPreferred(0x12);  // 22.5ms
+    pAdvertising->start();
+
     Serial.printf("OK (%s)\n", DEVICE_NAME);
 }
 
@@ -2147,25 +2179,37 @@ void toggleBLE() {
         BLEDevice::init(DEVICE_NAME);
         pServer = BLEDevice::createServer();
         pServer->setCallbacks(new ServerCallbacks());
-        
+
         BLEService* pService = pServer->createService(SERVICE_UUID);
-        
+
         pTxCharacteristic = pService->createCharacteristic(
             CHARACTERISTIC_UUID_TX,
             BLECharacteristic::PROPERTY_NOTIFY | BLECharacteristic::PROPERTY_READ
         );
         pTxCharacteristic->addDescriptor(new BLE2902());
-        
+
         BLECharacteristic* pRxCharacteristic = pService->createCharacteristic(
             CHARACTERISTIC_UUID_RX,
             BLECharacteristic::PROPERTY_WRITE
         );
         pRxCharacteristic->setCallbacks(new RxCallbacks());
-        
+
         pService->start();
-        BLEDevice::getAdvertising()->addServiceUUID(SERVICE_UUID);
-        BLEDevice::getAdvertising()->start();
-        
+        BLEAdvertising* pAdvertising = BLEDevice::getAdvertising();
+
+        BLEAdvertisementData advData;
+        advData.setFlags(ESP_BLE_ADV_FLAG_GEN_DISC | ESP_BLE_ADV_FLAG_BREDR_NOT_SPT);
+        advData.setCompleteServices(BLEUUID(SERVICE_UUID));
+        pAdvertising->setAdvertisementData(advData);
+
+        BLEAdvertisementData scanResponse;
+        scanResponse.setName(DEVICE_NAME);
+        pAdvertising->setScanResponseData(scanResponse);
+
+        pAdvertising->setMinPreferred(0x06);
+        pAdvertising->setMaxPreferred(0x12);
+        pAdvertising->start();
+
         bleEnabled = true;
         deviceConnected = false;
         
@@ -2195,8 +2239,9 @@ void updateLCD() {
     
     lcd.clear();
     
-    switch (lcdPage % 5) {  // v1.1: Added IR status page
+    switch (lcdPage % 2) {
         case 0: {
+            // Moth count + timestamp + BLE status
             lcd.setCursor(0, 0);
             lcd.printf("Moths: %lu", detectionCount);
             lcd.setCursor(0, 1);
@@ -2210,32 +2255,7 @@ void updateLCD() {
             break;
         }
         case 1: {
-            lcd.setCursor(0, 0);
-            lcd.printf("Air: %.1fC", sensors.airTemp);
-            lcd.setCursor(0, 1);
-            lcd.printf("Humidity: %.0f%%", sensors.humidity);
-            break;
-        }
-        case 2: {
-            lcd.setCursor(0, 0);
-            lcd.printf("Soil: %.1fC", sensors.soilTemp);
-            lcd.setCursor(0, 1);
-            int pct = map(sensors.soilMoisture, 4095, 1000, 0, 100);
-            lcd.printf("Moist: %d%%", constrain(pct, 0, 100));
-            break;
-        }
-        case 3: {
-            // v1.1: Enhanced IR status page
-            lcd.setCursor(0, 0);
-            lcd.print("IR:");
-            lcd.print(irPWMActive ? "38kHz " : "OFF ");
-            lcd.print((digitalRead(IR_RECEIVER_PIN) == IR_BEAM_BROKEN_STATE) ? "BROKE" : "OK");
-            lcd.setCursor(0, 1);
-            lcd.printf("Trig:%lu", (unsigned long)irTransitionCount);
-            if (beamBlockedWarning) lcd.print(" !BLK");
-            break;
-        }
-        case 4: {
+            // Firmware version + uptime
             lcd.setCursor(0, 0);
             lcd.print("FW v");
             lcd.print(FIRMWARE_VERSION);
