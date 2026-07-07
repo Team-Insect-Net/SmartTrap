@@ -1,6 +1,6 @@
 /*
  * ============================================================================
- * SMARTTRAP FIRMWARE v1.6
+ * SMARTTRAP FIRMWARE v1.7
  * ============================================================================
  *
  * Copyright (c) 2024 Penn State University / CSIR-CRI Ghana
@@ -11,17 +11,26 @@
  *
  * ============================================================================
  *
+ * CHANGELOG v1.7 (RTC smart-update):
+ * ───────────────────────────────────
+ * [FIX] RTC no longer overwrites correct field time on every boot.
+ *       Old code called rtc.adjust(compileTime) unconditionally, so any
+ *       field reboot (power glitch, watchdog, deep-sleep wake) reset the
+ *       clock to the stale firmware compile time — causing wrong timestamps.
+ *
+ *       New logic: only set the RTC when the compile time is AHEAD of the
+ *       RTC time. That is true on a fresh upload (compile time ≈ now) and
+ *       on a dead-battery reset (RTC falls back to year 2000), but FALSE on
+ *       a normal field reboot (battery-backed RTC has advanced past compile
+ *       time). Net effect: upload → sync to computer clock; field boot →
+ *       keep RTC.
+ *
  * CHANGELOG v1.6 (4-beam dual-pin IR):
- * ─────────────────────────────────────
  * [NEW] Dual IR LED pin support — D6 (GPIO43) drives LEDs #1+#2,
  *       D0 (GPIO1) drives LEDs #3+#4. Both output 38kHz PWM in sync.
  *       All 4 TSOP receivers share D7 (GPIO44) in parallel.
- *
  * [CHANGED] Pin D0 repurposed from Soil Moisture to IR LED pair #2.
- *           Environmental sensors (DHT11, DS18B20, Soil Moisture) removed
- *           from this build to free GPIO for expanded IR coverage.
- *
- * [CHANGED] Resistor value in comments updated: 100Ω per LED (was 47Ω).
+ *           Environmental sensors removed to free GPIO for IR coverage.
  *
  * CHANGELOG v1.5:
  * [NEW] OV3660 camera sensor support with vflip + brightness
@@ -55,7 +64,7 @@
  *
  * ============================================================================
  *
- * Pin Configuration (v1.6 — 4-beam IR):
+ * Pin Configuration (v1.7 — 4-beam IR):
  *   D0 (GPIO1)  = IR LED pair #2 (LEDs #3+#4 via 100Ω each, 38kHz PWM)
  *   D1 (GPIO2)  = Free
  *   D2 (GPIO3)  = Free
@@ -132,7 +141,7 @@
 // ============================================================================
 
 #define DEVICE_NAME         "SmartTrap_001"
-#define FIRMWARE_VERSION    "1.6"
+#define FIRMWARE_VERSION    "1.7"
 
 // ── IR Detection ─────────────────────────────────────────────────────────────
 
@@ -282,7 +291,7 @@ void IRAM_ATTR irBeamBreakISR() {
 // IR LED PWM CONTROL (DUAL PIN — D6 + D0)
 // ============================================================================
 //
-// v1.6: Both pins output identical 38kHz PWM simultaneously.
+// Both pins output identical 38kHz PWM simultaneously.
 // D6 (GPIO43) drives LED pair #1+#2, D0 (GPIO1) drives LED pair #3+#4.
 // Each LED has its own 100Ω resistor → 21mA per LED, 42mA per pin.
 
@@ -464,8 +473,8 @@ void setup() {
 
     Serial.println();
     Serial.println("╔══════════════════════════════════════════╗");
-    Serial.println("║     SMARTTRAP FIRMWARE v1.6              ║");
-    Serial.println("║   4-Beam IR (D6+D0) + Camera + Daily    ║");
+    Serial.println("║     SMARTTRAP FIRMWARE v1.7              ║");
+    Serial.println("║   4-Beam IR + RTC smart-update          ║");
     Serial.println("╚══════════════════════════════════════════╝");
     Serial.println();
 
@@ -531,7 +540,7 @@ void setup() {
         createDirectory("/daily");
     }
 
-    lcdPrint("SmartTrap v1.6", "4-beam monitor");
+    lcdPrint("SmartTrap v1.7", "4-beam monitor");
     Serial.println(">>> System ready. Monitoring for moths (4 beams)... <<<\n");
     delay(2000);
 }
@@ -558,14 +567,30 @@ void initComponents() {
     }
     if (!lcdOK) Serial.println("FAIL");
 
-    lcdPrint("SmartTrap v1.6", "Starting...");
+    lcdPrint("SmartTrap v1.7", "Starting...");
 
+    // ── RTC init with smart time-update (v1.7) ───────────────────────────────
+    // Only sync the clock when compile time is AHEAD of the RTC:
+    //   - Fresh upload:   compileTime ≈ now, > RTC by a few seconds → SET
+    //   - Dead battery:   RTC fell back to year 2000, far behind    → SET
+    //   - Field reboot:   battery-backed RTC advanced past compile  → KEEP
     Serial.print("[RTC] Initializing... ");
     if (rtc.begin()) {
-        rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
         rtcOK = true;
+
+        DateTime compileTime(F(__DATE__), F(__TIME__));
+        DateTime rtcTime = rtc.now();
+
+        if (compileTime.unixtime() > rtcTime.unixtime()) {
+            rtc.adjust(compileTime);
+            Serial.println("OK (set to compile time — fresh upload)");
+        } else {
+            Serial.printf("OK (kept RTC — field boot, ahead by %lds)\n",
+                rtcTime.unixtime() - compileTime.unixtime());
+        }
+
         DateTime now = rtc.now();
-        Serial.printf("OK (%04d-%02d-%02d %02d:%02d:%02d)\n",
+        Serial.printf("[RTC] %04d-%02d-%02d %02d:%02d:%02d\n",
             now.year(), now.month(), now.day(),
             now.hour(), now.minute(), now.second());
     } else Serial.println("FAIL");
@@ -611,8 +636,8 @@ void restoreDetectionCount() {
 void initCamera() {
     Serial.print("[CAM] Initializing (OV3660)... ");
     camera_config_t config;
-    config.ledc_channel = LEDC_CHANNEL_4;   // v1.6: Channel 4 to avoid conflict
-    config.ledc_timer   = LEDC_TIMER_2;     //        with IR LED channels 0-1
+    config.ledc_channel = LEDC_CHANNEL_4;   // Channel 4 to avoid conflict
+    config.ledc_timer   = LEDC_TIMER_2;     // with IR LED channels 0-1
     config.pin_d0 = Y2_GPIO_NUM; config.pin_d1 = Y3_GPIO_NUM;
     config.pin_d2 = Y4_GPIO_NUM; config.pin_d3 = Y5_GPIO_NUM;
     config.pin_d4 = Y6_GPIO_NUM; config.pin_d5 = Y7_GPIO_NUM;
@@ -946,16 +971,26 @@ void updateLCD() {
 
     lcd.clear();
     switch (lcdPage % 2) {
-        case 0:
+        case 0: {
+            // Field RTC health check: full date on line 1 makes a dead-battery
+            // reset (2000-01-01) obvious at a glance; ticking seconds on line 2
+            // confirm the oscillator is alive.
+            DateTime t = rtc.now();
             lcd.setCursor(0, 0);
-            lcd.printf("Moths: %lu", detectionCount);
+            if (rtcOK) {
+                lcd.printf("%04d-%02d-%02d", t.year(), t.month(), t.day());
+            } else {
+                lcd.print("RTC FAIL");
+            }
             lcd.setCursor(0, 1);
             if (rtcOK) {
-                DateTime t = rtc.now();
-                lcd.printf("%02d:%02d ", t.hour(), t.minute());
+                lcd.printf("%02d:%02d:%02d M:%lu",
+                    t.hour(), t.minute(), t.second(), detectionCount);
+            } else {
+                lcd.printf("Moths: %lu", detectionCount);
             }
-            lcd.print("4-beam");
             break;
+        }
         case 1:
             lcd.setCursor(0, 0);
             lcd.print("FW v" + String(FIRMWARE_VERSION));
@@ -1080,7 +1115,12 @@ void loop() {
 
     handleButton();
 
-    unsigned long lcdInterval = (hasDetected && millis() - lastDetectionTime < POST_DETECTION_COOLDOWN_MS) ? 1000 : 3000;
+    // 1s refresh during cooldown OR while the clock page (page 0) is showing,
+    // so the seconds tick live for field RTC verification; 3s otherwise.
+    bool onClockPage = (lcdPage % 2) == 0;
+    unsigned long lcdInterval =
+        ((hasDetected && millis() - lastDetectionTime < POST_DETECTION_COOLDOWN_MS) || onClockPage)
+        ? 1000 : 3000;
     if (millis() - lastLCDUpdate > lcdInterval) {
         lastLCDUpdate = millis();
         updateLCD();
