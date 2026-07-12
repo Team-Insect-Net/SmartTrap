@@ -1,6 +1,6 @@
 /*
  * ============================================================================
- * SMARTTRAP FIRMWARE v1.8
+ * SMARTTRAP FIRMWARE v1.9 (RTC READ-ONLY)
  * ============================================================================
  *
  * Copyright (c) 2024 Penn State University / CSIR-CRI Ghana
@@ -11,17 +11,21 @@
  *
  * ============================================================================
  *
- * CHANGELOG v1.8 (RTC always-set):
- * ───────────────────────────────────
- * [CHANGE] RTC init simplified: every boot now calls rtc.adjust(compileTime)
- *          unconditionally. Compile + upload => the clock matches your build
- *          machine's time. No comparison logic, no conditional paths.
+ * CHANGELOG v1.9 (RTC read-only):
+ * ────────────────────────────────
+ * [CHANGE] This firmware NEVER writes the RTC. It only reads rtc.now().
+ *          All clock-setting logic (compile-time seed, NVS upload marker,
+ *          lostPower re-seed) has been REMOVED.
  *
- * [KNOWN LIMITATION] This also re-seeds on field reboots (brownout, watchdog,
- *          deep-sleep wake), resetting the clock to the stale compile time.
- *          Acceptable for bench/dev where you re-flash often. Before unattended
- *          field deployment, gate the adjust on rtc.lostPower(), or sync from
- *          SIM7670G network time (NITZ/NTP) once cellular is integrated.
+ *          To set the time, flash the separate **SetRTC** sketch, set the
+ *          clock (exact time over serial, or compile time), verify it on the
+ *          LCD, then flash THIS firmware. From then on the battery-backed
+ *          DS3231 keeps time and this firmware simply reads it — across
+ *          reboots, power-offs, and re-flashes, the clock is untouched.
+ *
+ * [SAFETY] On boot, if rtc.lostPower() is true or the year looks invalid,
+ *          it prints a WARNING but does NOT overwrite the clock. Fix by
+ *          re-flashing SetRTC.
  *
  * CHANGELOG v1.6 (4-beam dual-pin IR):
  * [NEW] Dual IR LED pin support — D6 (GPIO43) drives LEDs #1+#2,
@@ -62,7 +66,7 @@
  *
  * ============================================================================
  *
- * Pin Configuration (v1.8 — 4-beam IR):
+ * Pin Configuration (v1.9 — 4-beam IR):
  *   D0 (GPIO1)  = IR LED pair #2 (LEDs #3+#4 via 100Ω each, 38kHz PWM)
  *   D1 (GPIO2)  = Free
  *   D2 (GPIO3)  = Free
@@ -471,7 +475,7 @@ void setup() {
 
     Serial.println();
     Serial.println("╔══════════════════════════════════════════╗");
-    Serial.println("║     SMARTTRAP FIRMWARE v1.8              ║");
+    Serial.println("║     SMARTTRAP FIRMWARE v1.9              ║");
     Serial.println("║   4-Beam IR + RTC always-set            ║");
     Serial.println("╚══════════════════════════════════════════╝");
     Serial.println();
@@ -538,7 +542,7 @@ void setup() {
         createDirectory("/daily");
     }
 
-    lcdPrint("SmartTrap v1.8", "4-beam monitor");
+    lcdPrint("SmartTrap v1.9", "4-beam monitor");
     Serial.println(">>> System ready. Monitoring for moths (4 beams)... <<<\n");
     delay(2000);
 }
@@ -565,24 +569,29 @@ void initComponents() {
     }
     if (!lcdOK) Serial.println("FAIL");
 
-    lcdPrint("SmartTrap v1.8", "Starting...");
+    lcdPrint("SmartTrap v1.9", "Starting...");
 
-    // ── RTC init — always seed from compile time ─────────────────────────────
-    // Every boot sets the clock to the firmware compile time (__DATE__/__TIME__).
-    // Simple by design: compile + upload => RTC matches your build machine's clock.
-    // NOTE: this also runs on field reboots (brownout/watchdog), which will reset
-    //       the clock to the (now-stale) compile time. Fine for bench/dev; revisit
-    //       before unattended field deployment (see lostPower() or SIM7670G NTP).
+    // ── RTC init — set on firmware upload, then RTC takes over ────────────────
+    // Rule: the clock is seeded from compile time ONLY on a fresh upload.
+    // After that, every reboot / power-off / power-on trusts the battery-backed RTC.
+    // ── RTC init — READ ONLY ─────────────────────────────────────────────────
+    // This firmware NEVER writes the clock. Set the time with the separate
+    // SetRTC sketch, then flash this. Here we only open the RTC and read it.
+    // If the clock reads an implausible year, we warn but keep running.
     Serial.print("[RTC] Initializing... ");
     if (rtc.begin()) {
         rtcOK = true;
 
-        rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
-
         DateTime now = rtc.now();
-        Serial.printf("OK (set to compile time)\n[RTC] %04d-%02d-%02d %02d:%02d:%02d\n",
+        Serial.printf("OK  %04d-%02d-%02d %02d:%02d:%02d\n",
             now.year(), now.month(), now.day(),
             now.hour(), now.minute(), now.second());
+
+        if (rtc.lostPower() || now.year() < 2024) {
+            // Clock is not trustworthy, but we do NOT overwrite it — that's the
+            // SetRTC sketch's job. Just flag it loudly so timestamps aren't trusted.
+            Serial.println("[RTC] *** WARNING: clock invalid/lostPower — reflash SetRTC to fix ***");
+        }
     } else Serial.println("FAIL");
 
     initSDCard();
