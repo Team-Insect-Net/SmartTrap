@@ -1,6 +1,6 @@
 /*
  * ============================================================================
- * SMARTTRAP FIRMWARE v1.8
+ * SMARTTRAP FIRMWARE v1.7
  * ============================================================================
  *
  * Copyright (c) 2024 Penn State University / CSIR-CRI Ghana
@@ -11,17 +11,19 @@
  *
  * ============================================================================
  *
- * CHANGELOG v1.8 (RTC always-set):
+ * CHANGELOG v1.7 (RTC smart-update):
  * ───────────────────────────────────
- * [CHANGE] RTC init simplified: every boot now calls rtc.adjust(compileTime)
- *          unconditionally. Compile + upload => the clock matches your build
- *          machine's time. No comparison logic, no conditional paths.
+ * [FIX] RTC no longer overwrites correct field time on every boot.
+ *       Old code called rtc.adjust(compileTime) unconditionally, so any
+ *       field reboot (power glitch, watchdog, deep-sleep wake) reset the
+ *       clock to the stale firmware compile time — causing wrong timestamps.
  *
- * [KNOWN LIMITATION] This also re-seeds on field reboots (brownout, watchdog,
- *          deep-sleep wake), resetting the clock to the stale compile time.
- *          Acceptable for bench/dev where you re-flash often. Before unattended
- *          field deployment, gate the adjust on rtc.lostPower(), or sync from
- *          SIM7670G network time (NITZ/NTP) once cellular is integrated.
+ *       New logic: only set the RTC when the compile time is AHEAD of the
+ *       RTC time. That is true on a fresh upload (compile time ≈ now) and
+ *       on a dead-battery reset (RTC falls back to year 2000), but FALSE on
+ *       a normal field reboot (battery-backed RTC has advanced past compile
+ *       time). Net effect: upload → sync to computer clock; field boot →
+ *       keep RTC.
  *
  * CHANGELOG v1.6 (4-beam dual-pin IR):
  * [NEW] Dual IR LED pin support — D6 (GPIO43) drives LEDs #1+#2,
@@ -62,7 +64,7 @@
  *
  * ============================================================================
  *
- * Pin Configuration (v1.8 — 4-beam IR):
+ * Pin Configuration (v1.7 — 4-beam IR):
  *   D0 (GPIO1)  = IR LED pair #2 (LEDs #3+#4 via 100Ω each, 38kHz PWM)
  *   D1 (GPIO2)  = Free
  *   D2 (GPIO3)  = Free
@@ -471,8 +473,8 @@ void setup() {
 
     Serial.println();
     Serial.println("╔══════════════════════════════════════════╗");
-    Serial.println("║     SMARTTRAP FIRMWARE v1.8              ║");
-    Serial.println("║   4-Beam IR + RTC always-set            ║");
+    Serial.println("║     SMARTTRAP FIRMWARE v1.7              ║");
+    Serial.println("║   4-Beam IR + RTC smart-update          ║");
     Serial.println("╚══════════════════════════════════════════╝");
     Serial.println();
 
@@ -538,7 +540,7 @@ void setup() {
         createDirectory("/daily");
     }
 
-    lcdPrint("SmartTrap v1.8", "4-beam monitor");
+    lcdPrint("SmartTrap v1.7", "4-beam monitor");
     Serial.println(">>> System ready. Monitoring for moths (4 beams)... <<<\n");
     delay(2000);
 }
@@ -565,22 +567,30 @@ void initComponents() {
     }
     if (!lcdOK) Serial.println("FAIL");
 
-    lcdPrint("SmartTrap v1.8", "Starting...");
+    lcdPrint("SmartTrap v1.7", "Starting...");
 
-    // ── RTC init — always seed from compile time ─────────────────────────────
-    // Every boot sets the clock to the firmware compile time (__DATE__/__TIME__).
-    // Simple by design: compile + upload => RTC matches your build machine's clock.
-    // NOTE: this also runs on field reboots (brownout/watchdog), which will reset
-    //       the clock to the (now-stale) compile time. Fine for bench/dev; revisit
-    //       before unattended field deployment (see lostPower() or SIM7670G NTP).
+    // ── RTC init with smart time-update (v1.7) ───────────────────────────────
+    // Only sync the clock when compile time is AHEAD of the RTC:
+    //   - Fresh upload:   compileTime ≈ now, > RTC by a few seconds → SET
+    //   - Dead battery:   RTC fell back to year 2000, far behind    → SET
+    //   - Field reboot:   battery-backed RTC advanced past compile  → KEEP
     Serial.print("[RTC] Initializing... ");
     if (rtc.begin()) {
         rtcOK = true;
 
-        rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+        DateTime compileTime(F(__DATE__), F(__TIME__));
+        DateTime rtcTime = rtc.now();
+
+        if (compileTime.unixtime() > rtcTime.unixtime()) {
+            rtc.adjust(compileTime);
+            Serial.println("OK (set to compile time — fresh upload)");
+        } else {
+            Serial.printf("OK (kept RTC — field boot, ahead by %lds)\n",
+                rtcTime.unixtime() - compileTime.unixtime());
+        }
 
         DateTime now = rtc.now();
-        Serial.printf("OK (set to compile time)\n[RTC] %04d-%02d-%02d %02d:%02d:%02d\n",
+        Serial.printf("[RTC] %04d-%02d-%02d %02d:%02d:%02d\n",
             now.year(), now.month(), now.day(),
             now.hour(), now.minute(), now.second());
     } else Serial.println("FAIL");
