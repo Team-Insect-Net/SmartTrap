@@ -1,12 +1,12 @@
-# SmartTrap v1.0
+# SmartTrap v2.0
 
 **Low-Power IoT Moth Trap Counter for Fall Armyworm Monitoring**
 
-An automated monitoring system that detects, counts, and logs moth entries into pheromone bucket traps. Designed for sustainable Fall Armyworm (FAW) management in agricultural settings.
+An automated monitoring system that detects, counts, and photographs moth entries into pheromone bucket traps. Designed for sustainable Fall Armyworm (FAW) management in agricultural settings.
 
 ![License](https://img.shields.io/badge/license-CC%20BY--NC--SA%204.0-blue.svg)
 ![Platform](https://img.shields.io/badge/platform-ESP32--S3-green.svg)
-![Version](https://img.shields.io/badge/version-1.0-orange.svg)
+![Version](https://img.shields.io/badge/version-2.0-orange.svg)
 
 ![Alt text](smartTrap_client.png)
 
@@ -14,7 +14,17 @@ An automated monitoring system that detects, counts, and logs moth entries into 
 
 ## Overview
 
-SmartTrap is a low-cost IoT device that automates the monitoring of Fall Armyworm moth populations. It uses infrared beam-break detection to count moths entering pheromone traps, records video/audio evidence, logs environmental conditions, and enables wireless data transfer via Bluetooth Low Energy (BLE).
+SmartTrap is a low-cost IoT device that automates the monitoring of Fall Armyworm moth populations. It uses a multi-beam infrared array to count moths entering pheromone traps, captures a JPEG image burst on each detection, and provides all control and data access over Bluetooth Low Energy (BLE) through the **SmartTrap Android app**.
+
+> **v2.0 is a major redesign — BLE-native, button-less, and screen-less.** The phone app replaces the physical button and 16×2 LCD. The environmental sensors (air temperature/humidity, soil temperature, soil moisture) and AVI/WAV recording from v1.x have been removed; detections are now recorded as JPEG bursts. See the [changelog](#whats-new-in-v20).
+
+### 📱 Android App
+
+The SmartTrap Android app is the primary interface for the trap (status, diagnostics, time-setting, file browsing/download, count reset, and WiFi/USB control).
+
+**Download the APK:** <https://drive.google.com/file/d/1rnNRD0PhtQwLzY0d07APNC46B7DXw_hL/view?usp=sharing>
+
+Install by enabling "Install unknown apps" for your browser or file manager, open the downloaded APK, then grant Bluetooth (and Location, if prompted) permissions. Pair with the trap using passkey **`123456`**.
 
 ### Key Applications
 - Fall Armyworm population monitoring
@@ -22,36 +32,45 @@ SmartTrap is a low-cost IoT device that automates the monitoring of Fall Armywor
 - Integrated Pest Management (IPM) decision support
 - Scalable deployment across multiple field sites
 
+### What's new in v2.0
+- **[REMOVED]** Physical button and 16×2 LCD — all interaction is over BLE via the phone app
+- **[REMOVED]** Environmental sensors (DHT11, DS18B20, soil moisture) and environmental logging
+- **[CHANGED]** Detection recording is now a 10-frame JPEG burst (was AVI video + WAV audio)
+- **[CHANGED]** IR detection upgraded to a 4-beam array driven from two pins
+- **[NEW]** BLE re-added on the low-RAM NimBLE stack so it can coexist with the camera
+- **[NEW]** On-demand WiFi SoftAP + HTTP server for fast bulk image download
+- **[NEW]** Set the RTC from the phone app (`SETTIME`) — no re-flash or SetRTC sketch needed for routine time-setting
+
 ---
 
 ## Features
 
 ### Core Functionality
-- **IR Beam-Break Detection** - Accurate moth counting with debounce filtering
-- **Video Recording** - 10-second AVI clips (MJPEG, 15 FPS) on each detection
-- **Audio Recording** - Simultaneous WAV audio capture via onboard microphone
-- **Environmental Logging** - Air temperature, humidity, soil temperature, soil moisture
-- **Dual CSV Logging** - Separate files for environmental data and detection events
+- **4-Beam IR Detection** - Multi-beam beam-break array with debounce filtering
+- **JPEG Burst Capture** - 10-frame image burst (1s apart) on each detection
+- **Scheduled Daily Photo** - Optional timed reference photo (default 08:00)
+- **CSV Logging** - Detection events, beam-health, and daily-photo logs
 - **SD Card Storage** - Local data storage with organized folder structure
 
 ### Data Management
-- **USB Mass Storage** - Press button at boot for easy data offload (plug in, copy files, delete to reset)
+- **Phone App over BLE** - Status, diagnostics, file browsing/download, and count reset from the Android app
+- **On-Demand WiFi Download** - `WIFI:ON` raises a SoftAP + HTTP server for fast bulk image transfer
+- **USB Mass Storage** - Mount the SD card as a USB drive via the `USB` BLE command
 - **Auto Count Recovery** - Detection count derived from SD card data; survives reboots, resets on data deletion
-- **Bluetooth Low Energy (BLE)** - Optional wireless monitoring for field diagnostics
-- **Password Protection** - Secure access to files and device reset
+- **Bonded BLE Security** - Passkey pairing with an encrypted link (legacy plaintext fallback for the old web client)
 
 ### Power Management
-- **Scheduled Sleep Mode** - Configurable active hours (default: 8 PM - 6 AM)
-- **Deep Sleep** - Ultra-low power consumption (~14µA) during inactive periods
-- **Button Wake** - Manual wake from sleep via hardware button
-- **Battery Support** - 3.7V LiPo battery or Power Bank (20,0000 mAh) with USB charging
+- **Scheduled Sleep Mode** - Optional configurable active hours (default off; 8 PM - 6 AM when enabled)
+- **Deep Sleep** - Ultra-low power consumption during inactive periods
+- **RTC-Timer Wake** - Wake from deep sleep on the DS3231 timer
+- **Battery Support** - 3.7V LiPo battery or Power Bank (20,000 mAh) with USB charging
 
-### Monitoring Dashboard
-- **Real-time Status** - Device info, uptime, schedule, detection count
-- **Component Health** - Status of all 9 hardware components
-- **Storage Monitor** - Visual SD card usage with color-coded warnings
+### Phone App (BLE)
+- **Real-time Status** - Device info, uptime, schedule, detection count (`STATUS`)
+- **Component Health** - Camera, mic, SD, RTC, BLE, and IR status (`DIAG`)
 - **Memory Info** - Heap and PSRAM monitoring
-- **Auto-Refresh** - Configurable intervals (10s to 30min)
+- **Live Pushes** - `EVENT` on each detection, `BEAM:BLOCKED`/`BEAM:RESTORED` on beam-health changes
+- **Time Sync** - Set the RTC from the app (`SETTIME`)
 
 ---
 
@@ -59,18 +78,15 @@ SmartTrap is a low-cost IoT device that automates the monitoring of Fall Armywor
 
 ### Main Components
 
-| Component | Model | Purpose |
-|-----------|-------|---------|
-| Microcontroller | XIAO ESP32S3 Sense | Processing, camera, microphone, SD card |
-| Display | DFR0063 16x2 I2C LCD | Status display |
-| Real-Time Clock | DS3231 | Accurate timestamps |
-| Air Sensor | DHT11 | Temperature and humidity |
-| Soil Sensor | DS18B20 | Soil temperature probe |
-| Soil Moisture | Capacitive sensor | Soil moisture level |
-| IR Emitter | 940nm LED | Beam-break transmitter |
-| IR Receiver | 38kHz module | Beam-break receiver |
-| Button | 4-pin tactile switch | User input |
+| Component | Model | Qty | Purpose |
+|-----------|-------|-----|---------|
+| Microcontroller | XIAO ESP32S3 Sense | 1 | Processing, camera, microphone, SD card |
+| Real-Time Clock | DS3231 | 1 | Accurate timestamps |
+| IR Emitter | 940nm LED | 4 | Beam-break transmitters |
+| IR Receiver | 38kHz module | 4 | Beam-break receivers |
+| Android phone | Runs the SmartTrap app (BLE 4.2+) | 1 | Device interface |
 
+*Removed in v2.0: 16×2 LCD, DHT11, DS18B20, soil-moisture sensor, and push button.*
 
 ![Alt text](hardware.jpeg)
 
@@ -78,22 +94,21 @@ SmartTrap is a low-cost IoT device that automates the monitoring of Fall Armywor
 
 | Value | Color Code | Purpose | Connection |
 |-------|------------|---------|------------|
-| 100Ω | Brown-Black-Brown | IR LED current limit | D6 → IR LED → GND |
-| 4.7kΩ | Yellow-Violet-Red | DS18B20 pull-up | D1 ↔ 3.3V |
-| 10kΩ | Brown-Black-Orange | IR receiver pull-down | D7 → GND |
-| 10kΩ | Brown-Black-Orange | Button pull-up | D3 → 3.3V |
+| 100Ω | Brown-Black-Brown | IR LED current limit (one per LED) | Drive pin → IR LED → GND |
+
+*The IR receivers use the ESP32's internal pull-up (`INPUT_PULLUP`) — no external pull-up/pull-down resistors are needed.*
 
 ### Pin Configuration
 
 ```
-D0 (GPIO1)  → Soil Moisture (Analog)
-D1 (GPIO2)  → DS18B20 DATA + 4.7kΩ pull-up to 3.3V
-D2 (GPIO3)  → DHT11 DATA
-D3 (GPIO4)  → Button → GND + 10kΩ pull-up to 3.3V
-D4 (GPIO5)  → I2C SDA (LCD + RTC)
-D5 (GPIO6)  → I2C SCL (LCD + RTC)
-D6 (GPIO43) → IR LED via 100Ω
-D7 (GPIO44) → IR Receiver + 10kΩ pull-down to GND
+D0 (GPIO1)  → IR LED pair #2 (LEDs #3+#4) via 100Ω each, 38kHz PWM
+D1 (GPIO2)  → FREE (was DS18B20)
+D2 (GPIO3)  → FREE (was DHT11)
+D3 (GPIO4)  → FREE (was Button)
+D4 (GPIO5)  → I2C SDA (RTC only)
+D5 (GPIO6)  → I2C SCL (RTC only)
+D6 (GPIO43) → IR LED pair #1 (LEDs #1+#2) via 100Ω each, 38kHz PWM
+D7 (GPIO44) → IR Receivers ×4 (parallel, internal pull-up; blocked = LOW)
 D8-D10      → RESERVED (SD Card - do not use)
 ```
 
@@ -124,11 +139,10 @@ D8-D10      → RESERVED (SD Card - do not use)
 
 Install via `Sketch → Include Library → Manage Libraries`:
 
-- `LiquidCrystal I2C` - LCD display
+- `NimBLE-Arduino` by h2zero (v1.4.x) - BLE stack (do **not** also enable Bluedroid)
 - `RTClib` - DS3231 real-time clock
-- `DHT sensor library` - DHT11 sensor
-- `OneWire` - DS18B20 communication
-- `DallasTemperature` - DS18B20 temperature
+
+*The v1.x sensor/LCD libraries (LiquidCrystal I2C, DHT sensor library, OneWire, DallasTemperature) are no longer needed.*
 
 ---
 
@@ -145,11 +159,12 @@ Install via `Sketch → Include Library → Manage Libraries`:
 
 3. **Configure settings** (optional)
    ```cpp
-   #define DEVICE_NAME         "SmartTrap_001"    // Unique device ID
-   #define AUTH_PASSWORD       "smart2025"        // BLE access password
-   #define ACTIVE_START_HOUR   20                 // Start monitoring (8 PM)
-   #define ACTIVE_END_HOUR     6                  // Stop monitoring (6 AM)
-   #define ENV_LOG_INTERVAL_MS 60000              // Log environment every 1 min
+   #define DEVICE_NAME         "SmartTrap_001"    // Unique device ID (BLE + WiFi)
+   #define BLE_PASSKEY         123456             // 6-digit BLE pairing passkey
+   #define AUTH_PASSWORD       "smart2025"        // Legacy plaintext fallback
+   #define WIFI_AP_PASSWORD    "trap12345"        // On-demand WiFi image server
+   #define JPEG_BURST_COUNT    10                 // Frames captured per detection
+   #define DAILY_PHOTO_HOUR    8                  // Scheduled daily photo (−1 = off)
    ```
 
 4. **Upload to device**
@@ -165,78 +180,77 @@ Install via `Sketch → Include Library → Manage Libraries`:
 
 ## Usage
 
-### USB Modes at Startup
+The device runs automatically on power-up — there is no button or LCD. Everything else is done from the **SmartTrap Android app** over BLE. Pair once with passkey **`123456`**; the bonded, encrypted link then authorizes protected commands.
 
-When you plug in the device, you have 10 seconds to choose:
+### Connecting
 
-| Action | Result | Use For |
-|--------|--------|---------|
-| **Do nothing** (default) | Normal Mode | Field monitoring, firmware updates |
-| **Press BUTTON** | USB Drive Mode | Data transfer (SD card as USB drive) |
+1. Install and open the Android app (see [Android App](#-android-app) above)
+2. Scan and connect to your trap (default BLE name `SmartTrap_001`)
+3. Enter the pairing passkey `123456` when prompted
 
-**Normal Mode (Default)** - Device starts monitoring automatically. Perfect for:
-- Field deployment with power bank
-- Firmware updates via Arduino IDE
-- Debugging with Serial Monitor
+### BLE Commands
 
-**USB Drive Mode** (Press button) - SD card appears as USB drive:
-1. Plug in USB-C cable
-2. Press BUTTON within 10 seconds
-3. SD card appears as removable drive
-4. Copy your files
-5. Eject and unplug
+| Command | Access | Description |
+|---------|--------|-------------|
+| `STATUS` | open | Device info, uptime, schedule, detection count |
+| `DIAG` | open | Camera/mic/SD/RTC/BLE/IR status + memory |
+| `DETECTIONS` | open | Current detection count |
+| `PING` | open | Liveness check (`PONG`) |
+| `LIST` / `CD:` / `GET:` | protected | Browse and download SD card files |
+| `DELETE:` / `RESET` | protected | Delete files / wipe data and zero the count |
+| `SETTIME:YYYY-MM-DD HH:MM:SS` | protected | Set the RTC from the phone |
+| `WIFI:ON` / `WIFI:OFF` | protected | Raise / tear down the WiFi image server |
+| `USB` | protected | Mount the SD card as a USB Mass Storage drive |
+
+Live pushes: `EVENT:det=…` on each detection, `BEAM:BLOCKED`/`BEAM:RESTORED` on beam-health changes. Full spec: **[BLE Protocol](docs/SmartTrap_v2.0_BLE_Protocol.md)**.
+
+### Getting Data Off the Trap
+
+- **Photos (fast):** send `WIFI:ON` → join the trap's WiFi (`SmartTrap_001` / `trap12345`) → download JPEGs over HTTP → `WIFI:OFF`
+- **Logs:** browse with `LIST`/`CD` and download with `GET` over BLE
+- **Bulk:** send `USB` to mount the SD card over USB-C, or pull the microSD card
 
 ### Resetting Detection Count
 
-The moth count is derived from the data on the SD card. To reset:
-1. Connect via **USB Drive Mode** (press button at boot)
-2. Delete the `/logs/` and `/events/` folders
-3. Reboot — count starts at 0
+The moth count is derived from `detections.csv`. To reset: send **`RESET`** over BLE, or delete `/events/` and `/logs/` in USB drive mode, then reboot — count starts at 0.
 
-### Web Client (Optional BLE Monitoring)
+### Legacy Web Client (optional)
 
-1. Serve `SmartTrap_v1.0_Client.html` via localhost (required for Web Bluetooth)
-2. Open in **Google Chrome**
-3. Click "Connect to Trap" and select your device
-4. Enter password when prompted (default: `smart2025`)
-
-### Button Controls
-
-| Action | Function |
-|--------|----------|
-| Press during startup countdown | Enter **USB Drive Mode** (data transfer) |
-| Short press (<1s) | Toggle LCD backlight |
-| Long press (5s) | Toggle BLE on/off |
-| Press during sleep | Wake device |
+The old `SmartTrap_v1.0_Client.html` still connects via the plaintext `AUTH:smart2025` fallback (Chrome + Web Bluetooth, served over localhost), but the Android app is the recommended interface.
 
 ### Data Files
 
 ```
-/logs/
-  ├── environment.csv    # Periodic environmental readings
-  └── detections.csv     # Detection events with conditions
-
 /events/
-  └── YYYYMMDD/          # Daily folders
-      ├── HHMMSS.avi     # Video recordings
-      └── HHMMSS.wav     # Audio recordings
+  └── YYYYMMDD/                     # Daily detection folders
+      └── img_<timestamp>_f<n>.jpg  # 10-frame JPEG burst per detection
+
+/daily/
+  └── YYYYMMDD_HH.jpg               # Scheduled daily photo(s)
+
+/logs/
+  ├── detections.csv               # Detection events
+  ├── beam_health.csv              # IR beam block/restore log
+  └── daily_photos.csv             # Scheduled-photo log
 ```
 
 ---
 
 ## Data Format
 
-### environment.csv
-```csv
-timestamp,air_temp,humidity,soil_temp,soil_moisture
-2024-01-15 20:30:00,24.5,65.2,18.3,2450
-```
-
 ### detections.csv
 ```csv
-timestamp,detection_num,air_temp,humidity,soil_temp,soil_moisture,video_file,audio_file
-2024-01-15 21:45:32,1,23.8,68.1,17.9,2380,/events/20240115/214532.avi,/events/20240115/214532.wav
+timestamp,detection_num,event_dir,burst_timestamp,frames,audio_file
+2026-07-17 21:45:32,1,/events/20260717,214532,10,
 ```
+
+### beam_health.csv
+```csv
+timestamp,event,ir_receiver_state
+2026-07-17 21:44:10,BLOCKED,LOW
+```
+
+*v2.0 records images and counts only — there is no environmental (`environment.csv`) logging.*
 
 ---
 
@@ -262,10 +276,13 @@ timestamp,detection_num,air_temp,humidity,soil_temp,soil_moisture,video_file,aud
 
 | Document | Description |
 |----------|-------------|
-| [Hardware Guide](docs/SmartTrap_v1.0_Hardware_Guide.md) | Wiring diagrams, component list, assembly |
-| [Firmware Guide](docs/SmartTrap_v1.0_Firmware_Guide.md) | Arduino setup, configuration, BLE commands |
-| [Field Guide](docs/SmartTrap_v1.0_Field_Guide.md) | Deployment, maintenance, troubleshooting |
-| [Quick Reference](docs/SmartTrap_v1.0_Quick_Reference.md) | Single-page printable card |
+| [Hardware Guide](docs/SmartTrap_v2.0_Hardware_Guide.md) | Wiring diagrams, component list, assembly |
+| [Firmware Guide](docs/SmartTrap_v2.0_Firmware_Guide.md) | Arduino setup, configuration, BLE commands |
+| [Field Guide](docs/SmartTrap_v2.0_Field_Guide.md) | Deployment, maintenance, app-based data collection |
+| [Quick Reference](docs/SmartTrap_v2.0_Quick_Reference.md) | Single-page printable card |
+| [BLE Protocol](docs/SmartTrap_v2.0_BLE_Protocol.md) | GATT layout, pairing, command set, WiFi download |
+
+*Legacy v1.0 guides remain in `docs/` for the pre-2.0 hardware.*
 
 ---
 
@@ -275,13 +292,14 @@ timestamp,detection_num,air_temp,humidity,soil_temp,soil_moisture,video_file,aud
 |---------|----------|
 | No Serial output | Enable "USB CDC On Boot" in Arduino IDE |
 | Upload fails | Hold BOOT → Press RESET → Release → Upload |
+| Compile error on `NimBLEDevice.h` | Install NimBLE-Arduino (h2zero, v1.4.x) |
 | SD card not detected | Use FAT32 format, ≤32GB card |
-| DS18B20 reads -999 | Check 4.7kΩ pull-up resistor |
-| False button wakes | Add 10kΩ pull-up resistor to button |
-| BLE not visible | Long press button (5s) to enable |
-| Need USB Drive Mode | Press BUTTON during 10-second countdown |
-| Device not monitoring | Don't press button at startup (Normal Mode is default) |
-| Power bank → no monitoring | This is fixed! Normal Mode is now default |
+| Phone won't pair | Confirm passkey `123456`; remove the old bond and re-pair |
+| Protected command rejected | `ERROR:AuthRequired` — pair (bond) or send `AUTH:` first |
+| False / missed detections | Re-align IR beams; check `DIAG` shows `ir=CLEAR` |
+| RTC time wrong | Send `SETTIME:` from the app; check the DS3231 coin cell |
+| WiFi download won't start | Send `WIFI:ON`; join `SmartTrap_001` / `trap12345` |
+| Need USB drive mode | Send the `USB` command from the app |
 
 ---
 
